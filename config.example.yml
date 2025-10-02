@@ -1,0 +1,35 @@
+service:
+  poll_interval: 300  # Check for new commits every 5 minutes
+  log_level: "INFO"
+  max_workers: 4  # Number of parallel test workers
+
+database:
+  path: "~/.fullautoci/database.sqlite"  # SQLite database path
+
+api:
+  host: "0.0.0.0"  # Listen on all interfaces
+  port: 5000
+  debug: false
+  
+tools:
+  pylint:
+    enabled: true
+    config_file: "~/.fullautoci/pylintrc"  # Custom pylint configuration
+  
+  coverage:
+    enabled: true
+    run_tests_cmd: ["pytest", "-xvs"]  # Custom test command
+
+# Repository-specific configuration
+repositories:
+  # Example repository configuration
+  1:  # Repository ID
+    name: "Example Project"
+    tools:
+      pylint:
+        config_file: ".pylintrc"  # Use repository-specific pylintrc
+    notifications:
+      email:
+        - "admin@example.com"
+      slack:
+        webhook: "https://hooks.slack.com/services/XXXXXXXXX/YYYYYYYYY/ZZZZZZZZZZZZZZZZZZZZZZZZ"

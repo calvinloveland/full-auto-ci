@@ -1,0 +1,13 @@
+# Example Full Auto CI Configuration
+data_directory: /home/vscode/.fullautoci
+database:
+  path: /home/vscode/.fullautoci/database.sqlite
+  backup_path: /home/vscode/.fullautoci/backups
+repositories_directory: /home/vscode/.fullautoci/repositories
+webhook:
+  secret: "change_me_in_production"
+  enabled: true
+api:
+  host: "0.0.0.0"  # Listen on all interfaces inside container
+  port: 5000
+  debug: true

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "full_auto_ci"
+version = "0.1.0"
+description = "Fully automatic Continuous Integration"
+authors = [
+    {name = "Full Auto CI Team", email = "example@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+]
+dependencies = [
+    "pylint>=2.8.0",
+    "coverage>=5.5",
+    "pytest>=6.2.5",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+api = [
+    "flask>=2.0.0",
+    "flask-cors>=3.0.10",
+]
+dashboard = [
+    "flask>=2.0.0",
+    "jinja2>=3.0.0",
+]
+dev = [
+    "pytest>=6.2.5",
+    "pytest-cov>=2.12.1",
+    "black>=21.5b2",
+    "isort>=5.9.1",
+    "mypy>=0.812",
+]
+
+[project.scripts]
+full-auto-ci = "src.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

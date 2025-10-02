@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  app:
+    build: 
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        VARIANT: "3.10-bullseye"
+    volumes:
+      - ..:/workspaces/full_auto_ci:cached
+      - full_auto_ci_data:/home/vscode/.fullautoci
+      # Share the Docker socket for nested Docker
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: sleep infinity
+    environment:
+      - FULLAUTOCI_CONFIG=/home/vscode/.fullautoci/config.yml
+      - FULLAUTOCI_DB=/home/vscode/.fullautoci/database.sqlite
+    ports:
+      - "5000:5000"  # Flask API
+    restart: unless-stopped
+    user: vscode
+    container_name: full_auto_ci_dev
+
+volumes:
+  full_auto_ci_data:
