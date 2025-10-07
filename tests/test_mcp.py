@@ -59,7 +59,12 @@ class DummyData:
 class DummyService:
     def __init__(self) -> None:
         self.repositories = [
-            {"id": 1, "name": "Repo One", "url": "https://example.com/one.git", "branch": "main"}
+            {
+                "id": 1,
+                "name": "Repo One",
+                "url": "https://example.com/one.git",
+                "branch": "main",
+            }
         ]
         self.data = DummyData()
         self.queued = []
@@ -75,10 +80,14 @@ class DummyService:
     def get_test_results(
         self, repo_id: int, *, commit_hash: str | None = None, limit: int = 20
     ):
-        runs = self.data.fetch_recent_test_runs(repo_id, limit=limit, commit_hash=commit_hash)
+        runs = self.data.fetch_recent_test_runs(
+            repo_id, limit=limit, commit_hash=commit_hash
+        )
         enriched = []
         for run in runs:
-            enriched.append({**run, "results": self.data.fetch_results_for_test_run(run["id"])})
+            enriched.append(
+                {**run, "results": self.data.fetch_results_for_test_run(run["id"])}
+            )
         return enriched
 
 
@@ -93,7 +102,9 @@ def _run(coro):
 
 def test_handshake_announces_capabilities(dummy_service):
     server = MCPServer(dummy_service)
-    response = _run(server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "handshake"}))
+    response = _run(
+        server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "handshake"})
+    )
     assert response["result"]["name"] == "full-auto-ci"
     capability_names = {cap["name"] for cap in response["result"]["capabilities"]}
     assert capability_names == {"listRepositories", "queueTestRun", "getLatestResults"}
@@ -101,7 +112,9 @@ def test_handshake_announces_capabilities(dummy_service):
 
 def test_list_repositories_returns_service_data(dummy_service):
     server = MCPServer(dummy_service)
-    response = _run(server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "listRepositories"}))
+    response = _run(
+        server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "listRepositories"})
+    )
     repos = response["result"]["repositories"]
     assert repos[0]["name"] == "Repo One"
 
@@ -158,7 +171,11 @@ def test_get_latest_results_enriches_runs(dummy_service):
 def test_requires_token_when_configured(dummy_service):
     server = MCPServer(dummy_service, auth_token="secret")
     with pytest.raises(MCPError) as excinfo:
-        _run(server.handle_message({"jsonrpc": "2.0", "id": 6, "method": "listRepositories"}))
+        _run(
+            server.handle_message(
+                {"jsonrpc": "2.0", "id": 6, "method": "listRepositories"}
+            )
+        )
     assert excinfo.value.code == -32604
 
     response = _run(

@@ -169,7 +169,9 @@ class CLI:
         mcp_parser = subparsers.add_parser("mcp", help="Model Context Protocol server")
         mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
 
-        mcp_serve = mcp_subparsers.add_parser("serve", help="Start an MCP server endpoint")
+        mcp_serve = mcp_subparsers.add_parser(
+            "serve", help="Start an MCP server endpoint"
+        )
         mcp_serve.add_argument("--host", default="127.0.0.1", help="Bind host")
         mcp_serve.add_argument("--port", type=int, default=8765, help="Bind port")
         mcp_serve.add_argument(
@@ -321,7 +323,9 @@ class CLI:
             host = args.host
             port = args.port
 
-            print(f"Starting MCP server on {host}:{port} (token={'enabled' if token else 'disabled'})")
+            print(
+                f"Starting MCP server on {host}:{port} (token={'enabled' if token else 'disabled'})"
+            )
 
             async def runner() -> None:
                 try:
@@ -439,9 +443,7 @@ class CLI:
                 for result in results:
                     tool = result.get("tool", "unknown")
                     status = result.get("status", "unknown")
-                    summary = self._summarize_tool_output(
-                        result.get("output"), status
-                    )
+                    summary = self._summarize_tool_output(result.get("output"), status)
                     line = f"  - {tool}: {status}"
                     if summary:
                         line += f" ({summary})"

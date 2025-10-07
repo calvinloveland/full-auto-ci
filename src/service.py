@@ -527,7 +527,9 @@ class CIService:
                 "Uncommitted changes detected in the source repository; "
                 "only committed files are included in this run."
             )
-            logger.warning("%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", ""))
+            logger.warning(
+                "%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", "")
+            )
             warnings.append(warning)
 
         test_run_id = self._create_test_run(repo_id, commit_hash)

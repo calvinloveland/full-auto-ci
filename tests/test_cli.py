@@ -427,6 +427,7 @@ class TestCLI(unittest.TestCase):
     def test_mcp_serve_command(self, mock_server_cls, mock_async_run):
         mock_server = MagicMock()
         mock_server_cls.return_value = mock_server
+
         def fake_run(coro):
             coro.close()
             return None

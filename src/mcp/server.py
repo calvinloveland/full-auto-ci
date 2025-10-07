@@ -96,7 +96,9 @@ class MCPServer:
             ],
         }
 
-    async def _handle_list_repositories(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_list_repositories(
+        self, _params: Dict[str, Any]
+    ) -> Dict[str, Any]:
         repositories = self.service.list_repositories()
         return {"repositories": repositories}
 
@@ -117,7 +119,9 @@ class MCPServer:
             )
         return {"queued": True}
 
-    async def _handle_get_latest_results(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_get_latest_results(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
         repo_id = params.get("repositoryId")
         limit = params.get("limit", 5)
         if not isinstance(repo_id, int):
@@ -155,8 +159,16 @@ class MCPServer:
                     try:
                         message = json.loads(data.decode("utf-8"))
                     except json.JSONDecodeError as exc:
-                        error = MCPError(code=-32700, message="Parse error", data={"detail": str(exc)})
-                        writer.write((json.dumps(self._error_response(None, error)) + "\n").encode("utf-8"))
+                        error = MCPError(
+                            code=-32700,
+                            message="Parse error",
+                            data={"detail": str(exc)},
+                        )
+                        writer.write(
+                            (
+                                json.dumps(self._error_response(None, error)) + "\n"
+                            ).encode("utf-8")
+                        )
                         await writer.drain()
                         continue
 

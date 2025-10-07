@@ -405,9 +405,7 @@ class DataAccess:
             for row in rows
         ]
 
-    def fetch_commit_for_test_run(
-        self, test_run_id: int
-    ) -> Optional[Dict[str, Any]]:
+    def fetch_commit_for_test_run(self, test_run_id: int) -> Optional[Dict[str, Any]]:
         """Fetch commit metadata associated with a test run."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -437,9 +435,7 @@ class DataAccess:
             "repository_id": row[5],
         }
 
-    def fetch_results_for_test_run(
-        self, test_run_id: int
-    ) -> List[Dict[str, Any]]:
+    def fetch_results_for_test_run(self, test_run_id: int) -> List[Dict[str, Any]]:
         """Fetch tool results for a specific test run."""
         commit = self.fetch_commit_for_test_run(test_run_id)
         if not commit or commit.get("id") is None:

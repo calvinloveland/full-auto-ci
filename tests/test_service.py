@@ -186,9 +186,7 @@ class TestCIService(unittest.TestCase):
         mock_store.assert_called_once()
 
     def test_get_test_results_hydrates_commit_and_results(self):
-        repo_id = self.service.add_repository(
-            "demo", "https://example.com/demo.git"
-        )
+        repo_id = self.service.add_repository("demo", "https://example.com/demo.git")
 
         commit_hash = "deadbeef"
         commit_id = self.service.data.create_commit(
@@ -226,7 +224,9 @@ class TestCIService(unittest.TestCase):
     @patch("src.service.CIService._has_local_changes", return_value=True)
     @patch("src.service.CIService._create_test_run", return_value=99)
     @patch("src.service.CIService._store_results")
-    @patch("src.service.CIService._summarize_tool_results", return_value=("success", None))
+    @patch(
+        "src.service.CIService._summarize_tool_results", return_value=("success", None)
+    )
     @patch("src.service.CIService._update_test_run")
     @patch("src.git.GitTracker.get_repository")
     def test_run_tests_warns_when_source_dirty(
@@ -254,6 +254,7 @@ class TestCIService(unittest.TestCase):
         self.assertIn("warnings", result)
         self.assertTrue(result["warnings"])
         mock_dirty.assert_called_once_with("/source")
+
     def test_summarize_tool_results_reports_errors(self):
         results = {
             "pylint": {"status": "success"},
@@ -266,7 +267,10 @@ class TestCIService(unittest.TestCase):
                 "error": "tests failed",
             },
         }
-        status, message = self.service._summarize_tool_results(  # pylint: disable=protected-access
+        (
+            status,
+            message,
+        ) = self.service._summarize_tool_results(  # pylint: disable=protected-access
             results
         )
         self.assertEqual(status, "error")
@@ -274,16 +278,30 @@ class TestCIService(unittest.TestCase):
         self.assertIn("pytest", message)
 
     def test_coerce_bool_variants(self):
-        self.assertTrue(self.service._coerce_bool(True))  # pylint: disable=protected-access
-        self.assertFalse(self.service._coerce_bool(False))  # pylint: disable=protected-access
-        self.assertTrue(self.service._coerce_bool("yes"))  # pylint: disable=protected-access
-        self.assertFalse(self.service._coerce_bool("0"))  # pylint: disable=protected-access
-        self.assertTrue(self.service._coerce_bool(1))  # pylint: disable=protected-access
-        self.assertFalse(self.service._coerce_bool(0))  # pylint: disable=protected-access
+        self.assertTrue(
+            self.service._coerce_bool(True)
+        )  # pylint: disable=protected-access
+        self.assertFalse(
+            self.service._coerce_bool(False)
+        )  # pylint: disable=protected-access
+        self.assertTrue(
+            self.service._coerce_bool("yes")
+        )  # pylint: disable=protected-access
+        self.assertFalse(
+            self.service._coerce_bool("0")
+        )  # pylint: disable=protected-access
+        self.assertTrue(
+            self.service._coerce_bool(1)
+        )  # pylint: disable=protected-access
+        self.assertFalse(
+            self.service._coerce_bool(0)
+        )  # pylint: disable=protected-access
 
     @patch("src.service.os.path.isdir", return_value=False)
     def test_has_local_changes_nonexistent(self, mock_isdir):
-        self.assertFalse(self.service._has_local_changes("/missing"))  # pylint: disable=protected-access
+        self.assertFalse(
+            self.service._has_local_changes("/missing")
+        )  # pylint: disable=protected-access
         mock_isdir.assert_called_once_with("/missing")
 
     @patch("src.service.subprocess.run")
@@ -293,7 +311,9 @@ class TestCIService(unittest.TestCase):
         mock_result.stdout = " M file.txt\n"
         mock_run.return_value = mock_result
 
-        self.assertTrue(self.service._has_local_changes("/repo"))  # pylint: disable=protected-access
+        self.assertTrue(
+            self.service._has_local_changes("/repo")
+        )  # pylint: disable=protected-access
         mock_isdir.assert_called_once_with("/repo")
         mock_run.assert_called_once()
 
