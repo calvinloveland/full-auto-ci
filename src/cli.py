@@ -1,6 +1,7 @@
 """Command-line interface for Full Auto CI."""
 
 import argparse
+import asyncio
 import json
 import logging
 import multiprocessing
@@ -12,6 +13,7 @@ import webbrowser
 from typing import Any, Dict, List, Optional
 
 from .dashboard import create_app
+from .mcp import MCPServer
 from .service import CIService
 
 # Configure logging
@@ -163,6 +165,23 @@ class CLI:
         user_remove = user_subparsers.add_parser("remove", help="Remove a user")
         user_remove.add_argument("username", help="Username to remove")
 
+        # MCP commands
+        mcp_parser = subparsers.add_parser("mcp", help="Model Context Protocol server")
+        mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+
+        mcp_serve = mcp_subparsers.add_parser("serve", help="Start an MCP server endpoint")
+        mcp_serve.add_argument("--host", default="127.0.0.1", help="Bind host")
+        mcp_serve.add_argument("--port", type=int, default=8765, help="Bind port")
+        mcp_serve.add_argument(
+            "--token",
+            help="Authentication token (defaults to FULL_AUTO_CI_MCP_TOKEN)",
+        )
+        mcp_serve.add_argument(
+            "--no-token",
+            action="store_true",
+            help="Disable token requirement even if FULL_AUTO_CI_MCP_TOKEN is set",
+        )
+
         return parser.parse_args(args)
 
     def run(self, args: Optional[List[str]] = None) -> int:
@@ -196,6 +215,8 @@ class CLI:
             return self._handle_config_command(parsed_args)
         elif parsed_args.command == "user":
             return self._handle_user_command(parsed_args)
+        elif parsed_args.command == "mcp":
+            return self._handle_mcp_command(parsed_args)
         else:
             print(f"Error: Unknown command {parsed_args.command}")
             return 1
@@ -290,6 +311,34 @@ class CLI:
             print(f"Error: Unknown service command {args.service_command}")
             return 1
 
+    def _handle_mcp_command(self, args: argparse.Namespace) -> int:
+        if args.mcp_command == "serve":
+            token = None
+            if not args.no_token:
+                token = args.token or os.getenv("FULL_AUTO_CI_MCP_TOKEN")
+
+            server = MCPServer(self.service, auth_token=token)
+            host = args.host
+            port = args.port
+
+            print(f"Starting MCP server on {host}:{port} (token={'enabled' if token else 'disabled'})")
+
+            async def runner() -> None:
+                try:
+                    await server.serve_tcp(host=host, port=port)
+                except asyncio.CancelledError:  # pragma: no cover
+                    pass
+
+            try:
+                asyncio.run(runner())
+            except KeyboardInterrupt:
+                print("MCP server stopped")
+                return 0
+            return 0
+
+        print(f"Error: Unknown MCP command {args.mcp_command}")
+        return 1
+
     def _handle_repo_command(self, args: argparse.Namespace) -> int:
         """Handle repository commands.
 
@@ -340,16 +389,64 @@ class CLI:
             results = self.service.run_tests(args.repo_id, args.commit)
             print("Test results:")
             print(f"Overall status: {results['status']}")
+            for warning in results.get("warnings", []):
+                print(f"Warning: {warning}")
             for tool, result in results["tools"].items():
                 print(f"- {tool}: {result['status']}")
             return 0
         elif args.test_command == "results":
-            print(f"Getting results for repository {args.repo_id}")
+            runs = self.service.get_test_results(
+                args.repo_id, commit_hash=getattr(args, "commit", None), limit=10
+            )
+
+            if not runs:
+                if args.commit:
+                    print(
+                        f"No test runs found for repository {args.repo_id} and commit {args.commit}."
+                    )
+                else:
+                    print(f"No test runs found for repository {args.repo_id}.")
+                return 0
+
+            print(f"Test runs for repository {args.repo_id}")
             if args.commit:
-                print(f"Commit: {args.commit}")
-            else:
-                print("All commits")
-            # In the future, implement fetching actual results
+                print(f"Filtered by commit: {args.commit}")
+
+            for run in runs:
+                print(
+                    f"Run {run['id']} | Commit: {run['commit_hash']} | Status: {run['status']}"
+                )
+                created = run.get("created_at", "-")
+                started = run.get("started_at") or "-"
+                completed = run.get("completed_at") or "-"
+                print(
+                    f"  Created: {created} | Started: {started} | Completed: {completed}"
+                )
+
+                commit = run.get("commit") or {}
+                message = commit.get("message")
+                if message:
+                    print(f"  Message: {message}")
+
+                if run.get("error"):
+                    print(f"  Error: {run['error']}")
+
+                results = run.get("results") or []
+                if not results:
+                    print("  (no tool results persisted)")
+                    continue
+
+                for result in results:
+                    tool = result.get("tool", "unknown")
+                    status = result.get("status", "unknown")
+                    summary = self._summarize_tool_output(
+                        result.get("output"), status
+                    )
+                    line = f"  - {tool}: {status}"
+                    if summary:
+                        line += f" ({summary})"
+                    print(line)
+
             return 0
         else:
             print(f"Error: Unknown test command {args.test_command}")
@@ -473,6 +570,48 @@ class CLI:
                 return int(raw)
             except ValueError:
                 return raw
+
+    @staticmethod
+    def _summarize_tool_output(
+        raw_output: Optional[str], result_status: Optional[str] = None
+    ) -> Optional[str]:
+        if not raw_output:
+            return None
+
+        try:
+            payload = json.loads(raw_output)
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        extras: List[str] = []
+
+        status = payload.get("status")
+        if status and status != result_status:
+            extras.append(str(status))
+
+        score = payload.get("score")
+        if isinstance(score, (int, float)):
+            extras.append(f"score {score:g}")
+
+        percentage = payload.get("percentage")
+        if isinstance(percentage, (int, float)):
+            extras.append(f"{percentage:.2f}%")
+
+        # Provide a single detail message if available when no other extras
+        if not extras:
+            details = payload.get("details")
+            if isinstance(details, list) and details:
+                first_detail = details[0]
+                if isinstance(first_detail, dict) and first_detail.get("message"):
+                    extras.append(first_detail["message"])
+
+        if not extras:
+            return None
+
+        return ", ".join(str(item) for item in extras)
 
     def _pid_file_path(self) -> str:
         base_dir = self.service.config.config.get(

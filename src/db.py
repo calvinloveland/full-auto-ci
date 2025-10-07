@@ -365,21 +365,31 @@ class DataAccess:
         return {row[0]: int(row[1]) for row in rows}
 
     def fetch_recent_test_runs(
-        self, repo_id: int, limit: int = 20
+        self, repo_id: int, limit: int = 20, commit_hash: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Fetch recent test runs for a repository."""
+        query = [
+            "SELECT id, commit_hash, status, created_at, started_at, completed_at, error",
+            "FROM test_runs",
+            "WHERE repository_id = ?",
+        ]
+        params: List[Any] = [repo_id]
+
+        if commit_hash:
+            query.append("AND commit_hash = ?")
+            params.append(commit_hash)
+
+        query.append("ORDER BY created_at DESC, id DESC")
+
+        if limit:
+            query.append("LIMIT ?")
+            params.append(limit)
+
+        sql = " ".join(query)
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT id, commit_hash, status, created_at, started_at, completed_at, error
-                FROM test_runs
-                WHERE repository_id = ?
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (repo_id, limit),
-            )
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
 
         return [

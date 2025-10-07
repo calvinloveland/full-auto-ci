@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -105,6 +106,30 @@ class CIService:
                 return default
             return normalized not in {"0", "false", "no", "off"}
         return default
+
+    @staticmethod
+    def _has_local_changes(repo_url: str) -> bool:
+        """Return True when ``repo_url`` points to a working tree with changes."""
+        if not repo_url or not os.path.isdir(repo_url):
+            return False
+
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_url,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Unable to inspect repository at %s for local changes: %s",
+                repo_url,
+                exc,
+            )
+            return False
+
+        return bool(result.stdout.strip())
 
     def _bootstrap_dogfood_repository(self) -> None:
         dogfood_config = self.config.get("dogfood") or {}
@@ -495,6 +520,16 @@ class CIService:
             logger.error("Repository %s not found", repo_id)
             return {"status": "error", "error": f"Repository {repo_id} not found"}
 
+        warnings: List[str] = []
+
+        if self._has_local_changes(getattr(repo, "url", "")):
+            warning = (
+                "Uncommitted changes detected in the source repository; "
+                "only committed files are included in this run."
+            )
+            logger.warning("%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", ""))
+            warnings.append(warning)
+
         test_run_id = self._create_test_run(repo_id, commit_hash)
         self._update_test_run(test_run_id, "running")
 
@@ -540,6 +575,8 @@ class CIService:
             }
             if message:
                 formatted_results["error"] = message
+            if warnings:
+                formatted_results["warnings"] = warnings
             return formatted_results
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
@@ -633,6 +670,26 @@ class CIService:
             }
             for repo in repos
         ]
+
+    def get_test_results(
+        self,
+        repo_id: int,
+        *,
+        commit_hash: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve recent test runs with associated tool outputs."""
+        runs = self.data.fetch_recent_test_runs(
+            repo_id, limit=limit, commit_hash=commit_hash
+        )
+
+        hydrated: List[Dict[str, Any]] = []
+        for run in runs:
+            commit = self.data.fetch_commit_for_test_run(run["id"])
+            results = self.data.fetch_results_for_test_run(run["id"])
+            hydrated.append({**run, "commit": commit, "results": results})
+
+        return hydrated
 
     # User management -----------------------------------------------------
 

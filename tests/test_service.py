@@ -1,5 +1,6 @@
 """Tests for the CI service."""
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -183,6 +184,118 @@ class TestCIService(unittest.TestCase):
         mock_update_run.assert_any_call(42, "running")
         mock_update_run.assert_any_call(42, "completed")
         mock_store.assert_called_once()
+
+    def test_get_test_results_hydrates_commit_and_results(self):
+        repo_id = self.service.add_repository(
+            "demo", "https://example.com/demo.git"
+        )
+
+        commit_hash = "deadbeef"
+        commit_id = self.service.data.create_commit(
+            repo_id,
+            commit_hash,
+            author="Dev",
+            message="Refactor",
+            timestamp=1234,
+        )
+
+        run_id = self.service.data.create_test_run(
+            repo_id, commit_hash, "completed", 1200
+        )
+        self.service.data.update_test_run(
+            run_id, status="completed", completed_at=1300, started_at=1250
+        )
+        self.service.data.insert_result(
+            commit_id,
+            "pylint",
+            "success",
+            json.dumps({"status": "success", "score": 9.5}),
+            0.5,
+        )
+
+        runs = self.service.get_test_results(repo_id)
+        self.assertEqual(len(runs), 1)
+        run = runs[0]
+        self.assertEqual(run["id"], run_id)
+        self.assertEqual(run["commit_hash"], commit_hash)
+        self.assertEqual(run["commit"]["hash"], commit_hash)
+        self.assertEqual(run["commit"]["message"], "Refactor")
+        self.assertEqual(len(run["results"]), 1)
+        self.assertEqual(run["results"][0]["tool"], "pylint")
+
+    @patch("src.service.CIService._has_local_changes", return_value=True)
+    @patch("src.service.CIService._create_test_run", return_value=99)
+    @patch("src.service.CIService._store_results")
+    @patch("src.service.CIService._summarize_tool_results", return_value=("success", None))
+    @patch("src.service.CIService._update_test_run")
+    @patch("src.git.GitTracker.get_repository")
+    def test_run_tests_warns_when_source_dirty(
+        self,
+        mock_get_repo,
+        _mock_update_run,
+        _mock_summarize,
+        _mock_store,
+        _mock_create_run,
+        mock_dirty,
+    ):
+        mock_repo = MagicMock()
+        mock_repo.repo_path = "/tmp/repo"
+        mock_repo.clone.return_value = True
+        mock_repo.checkout_commit.return_value = True
+        mock_repo.url = "/source"
+        mock_get_repo.return_value = mock_repo
+
+        with patch("src.service.os.path.exists", return_value=True), patch.object(
+            self.service, "tool_runner"
+        ) as mock_runner:
+            mock_runner.run_all.return_value = {"pylint": {"status": "success"}}
+            result = self.service.run_tests(1, "abcdef")
+
+        self.assertIn("warnings", result)
+        self.assertTrue(result["warnings"])
+        mock_dirty.assert_called_once_with("/source")
+    def test_summarize_tool_results_reports_errors(self):
+        results = {
+            "pylint": {"status": "success"},
+            "coverage": {
+                "status": "error",
+                "stderr": "coverage failed",
+            },
+            "pytest": {
+                "status": "error",
+                "error": "tests failed",
+            },
+        }
+        status, message = self.service._summarize_tool_results(  # pylint: disable=protected-access
+            results
+        )
+        self.assertEqual(status, "error")
+        self.assertIn("coverage", message)
+        self.assertIn("pytest", message)
+
+    def test_coerce_bool_variants(self):
+        self.assertTrue(self.service._coerce_bool(True))  # pylint: disable=protected-access
+        self.assertFalse(self.service._coerce_bool(False))  # pylint: disable=protected-access
+        self.assertTrue(self.service._coerce_bool("yes"))  # pylint: disable=protected-access
+        self.assertFalse(self.service._coerce_bool("0"))  # pylint: disable=protected-access
+        self.assertTrue(self.service._coerce_bool(1))  # pylint: disable=protected-access
+        self.assertFalse(self.service._coerce_bool(0))  # pylint: disable=protected-access
+
+    @patch("src.service.os.path.isdir", return_value=False)
+    def test_has_local_changes_nonexistent(self, mock_isdir):
+        self.assertFalse(self.service._has_local_changes("/missing"))  # pylint: disable=protected-access
+        mock_isdir.assert_called_once_with("/missing")
+
+    @patch("src.service.subprocess.run")
+    @patch("src.service.os.path.isdir", return_value=True)
+    def test_has_local_changes_detects_output(self, mock_isdir, mock_run):
+        mock_result = MagicMock()
+        mock_result.stdout = " M file.txt\n"
+        mock_run.return_value = mock_result
+
+        self.assertTrue(self.service._has_local_changes("/repo"))  # pylint: disable=protected-access
+        mock_isdir.assert_called_once_with("/repo")
+        mock_run.assert_called_once()
 
 
 if __name__ == "__main__":

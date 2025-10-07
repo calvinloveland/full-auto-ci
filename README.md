@@ -84,6 +84,12 @@ Run tests manually:
 full-auto-ci test run <repo_id> <commit_hash>
 ```
 
+Show stored test results (optionally filtered by commit):
+
+```bash
+full-auto-ci test results <repo_id> [--commit <commit_hash>]
+```
+
 ### REST API
 
 Start the API server (after installing API dependencies):
@@ -163,6 +169,44 @@ With coverage:
 ```bash
 pytest --cov=src tests/
 ```
+
+### UI tests (Playwright)
+
+Install the development extras (includes Playwright and fixtures) and the Chromium engine:
+
+```bash
+pip install -e ".[dashboard,dev]"
+playwright install --with-deps chromium
+```
+
+Run the UI smoke tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest ui_tests
+```
+
+The fixture starts the dashboard in headless mode with `FULL_AUTO_CI_OPEN_BROWSER=0` and `FULL_AUTO_CI_START_DASHBOARD=1`. Override the default host/port via `ui_tests/conftest.py` if you need to avoid local conflicts.
+
+### MCP server endpoint
+
+Expose the CI service over the Model Context Protocol using the built-in JSON-RPC server:
+
+```bash
+full-auto-ci mcp serve --host 127.0.0.1 --port 8765
+```
+
+Provide an auth token either via `--token` or the `FULL_AUTO_CI_MCP_TOKEN` environment variable. Disable authentication explicitly with `--no-token` for local experiments.
+
+Available operations:
+
+- `handshake` — discover server name, version, and capabilities.
+- `listRepositories` — enumerate tracked repositories (`id`, `name`, `url`, `branch`).
+- `queueTestRun` — enqueue a repository/commit pair for testing.
+- `getLatestResults` — retrieve recent test runs (with tool outputs) for a repository.
+
+The server speaks JSON-RPC 2.0 over newline-delimited TCP frames. Each request/response is a single JSON object encoded with UTF-8 and terminated by `\n`.
+
+See `examples/mcp_client.py` for a minimal asyncio client that performs a handshake and lists repositories.
 
 ### Code style
 

@@ -7,6 +7,7 @@ import tempfile
 import time
 
 import pytest
+from unittest.mock import MagicMock
 
 from src.dashboard import create_app
 from src.db import DataAccess
@@ -75,3 +76,23 @@ def test_repository_insights_partial(client):
     body = response.data.decode()
     assert "Recent Test Runs" in body
     assert "abc1234" in body
+
+
+def test_dashboard_main_runs(monkeypatch):
+    monkeypatch.setenv("FULL_AUTO_CI_DOGFOOD", "0")
+    from src.dashboard import __main__ as dashboard_main
+
+    mock_app = MagicMock()
+    mock_service = MagicMock()
+    mock_service.config.get.return_value = {
+        "host": "0.0.0.0",
+        "port": 9100,
+        "debug": True,
+    }
+    mock_app.config = {"CI_SERVICE": mock_service}
+
+    monkeypatch.setattr(dashboard_main, "create_app", lambda: mock_app)
+
+    dashboard_main.main()
+
+    mock_app.run.assert_called_once_with(host="0.0.0.0", port=9100, debug=True)

@@ -1,5 +1,7 @@
 """Tests for webhook handlers."""
 
+# pylint: disable=protected-access
+
 import hashlib
 import hmac
 import json
@@ -8,8 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.webhook import WebhookHandler
@@ -59,6 +60,14 @@ class TestWebhookHandler(unittest.TestCase):
         cursor.execute(
             "INSERT INTO repositories (url, name, branch) VALUES (?, ?, ?)",
             ("https://github.com/octocat/Hello-World.git", "Hello-World", "main"),
+        )
+        cursor.execute(
+            "INSERT INTO repositories (url, name, branch) VALUES (?, ?, ?)",
+            ("https://gitlab.com/example/Project.git", "Project", "main"),
+        )
+        cursor.execute(
+            "INSERT INTO repositories (url, name, branch) VALUES (?, ?, ?)",
+            ("https://bitbucket.org/workspace/repo.git", "repo", "main"),
         )
         conn.commit()
         conn.close()
@@ -160,6 +169,86 @@ class TestWebhookHandler(unittest.TestCase):
         headers = {"X-GitHub-Event": "push"}
         result = self.webhook_handler._handle_github(headers, payload)
         self.assertIsNone(result)
+
+    def test_handle_github_push_success(self):
+        payload = {
+            "repository": {
+                "full_name": "octocat/Hello-World",
+                "clone_url": "https://github.com/octocat/Hello-World.git",
+            },
+            "commits": [
+                {
+                    "id": "abc123",
+                    "author": {"name": "Octo", "email": "octo@example.com"},
+                    "message": "Update README",
+                    "timestamp": "2023-01-01T12:00:00Z",
+                }
+            ],
+        }
+        headers = {"X-GitHub-Event": "push"}
+
+        result = self.webhook_handler._handle_github(headers, payload)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["provider"], "github")
+        self.assertEqual(result["hash"], "abc123")
+        self.assertEqual(result["author"], "Octo")
+
+    def test_handle_gitlab_push_success(self):
+        payload = {
+            "project": {
+                "path_with_namespace": "example/Project",
+                "git_http_url": "https://gitlab.com/example/Project.git",
+            },
+            "commits": [
+                {
+                    "id": "def456",
+                    "author": {"name": "GitLab", "email": "gl@example.com"},
+                    "message": "Add feature",
+                    "timestamp": "2023-01-02T10:00:00Z",
+                }
+            ],
+        }
+        headers = {"X-Gitlab-Event": "Push Hook"}
+
+        result = self.webhook_handler._handle_gitlab(headers, payload)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["provider"], "gitlab")
+        self.assertEqual(result["hash"], "def456")
+
+    def test_handle_bitbucket_push_success(self):
+        payload = {
+            "repository": {
+                "full_name": "workspace/repo",
+                "links": {"html": {"href": "https://bitbucket.org/workspace/repo"}},
+            },
+            "push": {
+                "changes": [
+                    {
+                        "commits": [
+                            {
+                                "hash": "ff99aa",
+                                "author": {
+                                    "user": {"display_name": "Bit Bucket"},
+                                    "raw": "Bit Bucket <bb@example.com>",
+                                },
+                                "message": "Fix bug",
+                                "date": "2023-01-03T09:30:00Z",
+                            }
+                        ]
+                    }
+                ]
+            },
+        }
+        headers = {"X-Event-Key": "repo:push"}
+
+        result = self.webhook_handler._handle_bitbucket(headers, payload)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["provider"], "bitbucket")
+        self.assertEqual(result["hash"], "ff99aa")
+        self.assertEqual(result["author_email"], "bb@example.com")
 
     @patch("src.webhook.WebhookHandler._handle_github")
     def test_handle_method(self, mock_handle_github):

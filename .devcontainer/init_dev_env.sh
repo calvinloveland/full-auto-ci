@@ -50,6 +50,18 @@ else:
     print('ℹ️ Skipping dogfooding repository registration (FULL_AUTO_CI_DOGFOOD disabled)')
 "
 
+INSTALL_PLAYWRIGHT=${FULL_AUTO_CI_INSTALL_PLAYWRIGHT:-0}
+if [ "$INSTALL_PLAYWRIGHT" != "0" ]; then
+    if command -v playwright >/dev/null 2>&1; then
+        echo "\n🎭 Installing Playwright Chromium runtime (FULL_AUTO_CI_INSTALL_PLAYWRIGHT=${INSTALL_PLAYWRIGHT})"
+        playwright install --with-deps chromium || echo "⚠️ Playwright browser installation failed"
+    else
+        echo "⚠️ Playwright CLI not found; skip browser installation"
+    fi
+else
+    echo "ℹ️ Skipping Playwright browser installation (FULL_AUTO_CI_INSTALL_PLAYWRIGHT=${INSTALL_PLAYWRIGHT})"
+fi
+
 echo ""
 echo "🚀 Full Auto CI development environment initialized!"
 echo "To run the service:"

@@ -31,7 +31,8 @@
 - [ ] Improve test coverage
   - [ ] Integration tests
   - [ ] End-to-end tests
-  - [ ] use selenium or another tool for testing UI
+  - [x] Add dashboard template regression tests *(see `tests/test_dashboard.py`)*
+  - [ ] Stand up browser automation suite *(Playwright or Selenium; capture smoke flows for dashboard)*
 
 ### Phase 2 (Coming Soon)
 
@@ -40,13 +41,44 @@
   - [x] Create dashboard templates with Jinja2
   - [x] Add HTMX for dynamic content
   - [ ] Implement authentication and session management
+  - [ ] Wire dashboard smoke tests into CI *(reuse browser automation harness)*
 
 - [ ] Add visualization for test results
   - [ ] Historical trends
   - [ ] Commit-by-commit comparison
 
+### UI Testing Strategy
+
+- Current coverage relies on unit-level template tests (`tests/test_dashboard.py`) to validate key contexts render without errors.
+- Next milestone is adding a lightweight browser automation flow (Playwright preferred for HTMX support) that loads the dashboard, waits for HTMX swaps, and asserts key panels render.
+- CI service should expose a headless-friendly configuration (disable auto-open, bind to 127.0.0.1) so the UI suite can spin up the dashboard via CLI before running checks.
+- Capture regression fixtures for empty states (no repositories) and populated repositories (dogfooding repo) to guard against blank-page regressions reported previously.
+
+#### Execution Plan
+
+1. **Tooling bootstrap**
+  - [x] Add Playwright (Python) to dev dependencies and record install notes in `README.md`.
+  - [x] Configure pytest-playwright fixtures (`ui_tests/conftest.py`) to drive Chromium in headless mode.
+  - [x] Extend devcontainer init script to optionally run `playwright install --with-deps chromium` via `FULL_AUTO_CI_INSTALL_PLAYWRIGHT`.
+2. **Test harness wiring**
+  - [x] Stand up a `werkzeug`-backed dashboard server fixture (`ui_tests/conftest.py`) that boots `create_app` against an isolated database.
+  - [x] Implement Playwright fixtures that coordinate startup/teardown and expose the shared `page` fixture.
+3. **Scenario coverage**
+  - [x] Smoke test: verify dashboard shell renders header, repo list empty-state, and alerts load for HTMX placeholder.
+  - [x] Populated repo test: seed SQLite with dogfood repo + mock test runs, ensure insights cards show counts and recent run table populates.
+  - [ ] Regression view: confirm navigating to repository detail route loads commit list and tool tabs without console errors.
+4. **CI integration**
+  - [ ] Add `ui-tests` job to GitHub Actions with xvfb/headless dependencies; gate on optional matrix flag to control runtime cost.
+  - [ ] Update `README.md` with instructions for running `npm run ui-test` (or `pytest --ui`) locally and via CI.
+  - [ ] Document environment switches (e.g., `FULL_AUTO_CI_OPEN_BROWSER=0`) required for headless execution.
+
 - [ ] Add MCP server
-  - [ ] FILL OUT THESE CHECKMARKS
+  - [x] Define MCP capabilities surface (list repositories, queue test runs, fetch latest results)
+  - [x] Implement `src/mcp/server.py` shim wrapping `CIService` with async-safe adapters
+  - [ ] Support secure transport (Unix domain socket in dev, optional TCP with token auth)
+  - [x] Provide CLI entrypoint (`full-auto-ci mcp serve`) with graceful shutdown + logging
+  - [x] Add contract tests exercising handshake, tool execution, and error propagation
+  - [x] Document usage and wiring into assistants (`README` + sample client script)
 
 ### Phase 3 (Future)
 

@@ -1,5 +1,6 @@
 """Tests for the CLI module."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -97,6 +98,81 @@ class TestCLI(unittest.TestCase):
         # Verify that _handle_test_command was called
         mock_handle.assert_called_once()
         self.assertEqual(exit_code, 0)
+
+    @patch("builtins.print")
+    def test_test_run_outputs_warnings(self, mock_print):
+        """Warnings from run_tests should be surfaced in CLI output."""
+
+        self.cli.service.run_tests = lambda *_args: {
+            "status": "success",
+            "tools": {"pylint": {"status": "success"}},
+            "warnings": ["dirty repo"],
+        }
+
+        exit_code = self.cli.run(["test", "run", "1", "abcdef"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("Warning: dirty repo")
+
+    @patch("builtins.print")
+    def test_test_results_no_runs(self, mock_print):
+        """Results command should report when no runs are found."""
+
+        def fake_get_results(repo_id, *, commit_hash=None, limit=10):
+            self.assertEqual(repo_id, 1)
+            self.assertEqual(limit, 10)
+            self.assertIsNone(commit_hash)
+            return []
+
+        self.cli.service.get_test_results = fake_get_results
+
+        exit_code = self.cli.run(["test", "results", "1"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("No test runs found for repository 1.")
+
+    @patch("builtins.print")
+    def test_test_results_outputs_runs(self, mock_print):
+        """Results command should display run metadata and tool summaries."""
+
+        sample_run = {
+            "id": 42,
+            "commit_hash": "abc1234",
+            "status": "completed",
+            "created_at": 1000,
+            "started_at": 1001,
+            "completed_at": 1002,
+            "error": None,
+            "commit": {"message": "Update docs"},
+            "results": [
+                {
+                    "tool": "pylint",
+                    "status": "success",
+                    "output": json.dumps({"status": "success", "score": 9.5}),
+                    "duration": 0.5,
+                },
+                {
+                    "tool": "coverage",
+                    "status": "success",
+                    "output": json.dumps({"status": "success", "percentage": 49.73}),
+                    "duration": 1.2,
+                },
+            ],
+        }
+
+        self.cli.service.get_test_results = (
+            lambda repo_id, *, commit_hash=None, limit=10: [sample_run]
+        )
+
+        exit_code = self.cli.run(["test", "results", "1"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("Test runs for repository 1")
+        mock_print.assert_any_call("Run 42 | Commit: abc1234 | Status: completed")
+        mock_print.assert_any_call("  Created: 1000 | Started: 1001 | Completed: 1002")
+        mock_print.assert_any_call("  Message: Update docs")
+        mock_print.assert_any_call("  - pylint: success (score 9.5)")
+        mock_print.assert_any_call("  - coverage: success (49.73%)")
 
     def test_run_unknown_command(self):
         """Test running an unknown command."""
@@ -345,6 +421,25 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mock_remove.assert_called_once()
         mock_print.assert_any_call("Service is not running")
+
+    @patch("src.cli.asyncio.run")
+    @patch("src.cli.MCPServer")
+    def test_mcp_serve_command(self, mock_server_cls, mock_async_run):
+        mock_server = MagicMock()
+        mock_server_cls.return_value = mock_server
+        def fake_run(coro):
+            coro.close()
+            return None
+
+        mock_async_run.side_effect = fake_run
+
+        exit_code = self.cli.run(
+            ["mcp", "serve", "--host", "0.0.0.0", "--port", "9001", "--token", "tok"]
+        )
+
+        self.assertEqual(exit_code, 0)
+        mock_server_cls.assert_called_once_with(self.cli.service, auth_token="tok")
+        mock_async_run.assert_called_once()
 
 
 if __name__ == "__main__":
