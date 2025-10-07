@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>{% block title %}Full Auto CI{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('dashboard.static', filename='styles.css') }}" />
+</head>
+
+<body>
+  <header class="app-header">
+    <div class="container">
+      <h1><a href="{{ url_for('dashboard.home') }}">Full Auto CI Dashboard</a></h1>
+      <nav>
+        <a href="{{ url_for('dashboard.home') }}">Repositories</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-messages">
+      {% for category, message in messages %}
+      <div class="flash flash-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="app-footer">
+    <div class="container">
+      <small>Automating confidence in every commit.</small>
+    </div>
+  </footer>
+
+  <script src="https://unpkg.com/htmx.org@1.9.12"
+    integrity="sha384-OeA4jZb9XiAxZg/PquPLUyaHtkobaN6D+PfYZ7R6pujISiFDUFxIr05oig3NbS1U"
+    crossorigin="anonymous"></script>
+</body>
+
+</html>

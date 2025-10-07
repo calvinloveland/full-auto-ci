@@ -11,3 +11,17 @@ api:
   host: "0.0.0.0"  # Listen on all interfaces inside container
   port: 5000
   debug: true
+dashboard:
+  host: "0.0.0.0"
+  port: 8000
+  debug: true
+  secret_key: "dev-secret-change-me"
+  auto_open: false
+  auto_start: false
+
+dogfood:
+  enabled: true
+  name: "Full Auto CI"
+  url: "https://github.com/calvinloveland/full-auto-ci.git"
+  branch: "main"
+  queue_on_start: true

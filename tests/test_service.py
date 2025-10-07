@@ -16,10 +16,16 @@ class TestCIService(unittest.TestCase):
         """Set up test fixtures."""
         # Create a temporary database
         self.temp_db_fd, self.temp_db_path = tempfile.mkstemp()
+        self._dogfood_env = os.environ.get("FULL_AUTO_CI_DOGFOOD")
+        os.environ["FULL_AUTO_CI_DOGFOOD"] = "0"
         self.service = CIService(db_path=self.temp_db_path)
 
     def tearDown(self):
         """Tear down test fixtures."""
+        if self._dogfood_env is None:
+            os.environ.pop("FULL_AUTO_CI_DOGFOOD", None)
+        else:
+            os.environ["FULL_AUTO_CI_DOGFOOD"] = self._dogfood_env
         os.close(self.temp_db_fd)
         os.unlink(self.temp_db_path)
 

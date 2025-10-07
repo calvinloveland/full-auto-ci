@@ -3,7 +3,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.cli import CLI
 
@@ -19,6 +19,8 @@ class TestCLI(unittest.TestCase):
         os.close(self.temp_config_fd)
         os.unlink(self.temp_config_path)
         self.cli = CLI(config_path=self.temp_config_path, db_path=self.temp_db_path)
+        self.cli.service.config.set("dashboard", "auto_open", True)
+        self.cli.service.config.set("dashboard", "auto_start", False)
 
     def tearDown(self):
         """Tear down test fixtures."""
@@ -206,6 +208,143 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(exit_code_failure, 1)
         mock_print.assert_any_call("User 'alice' removed")
         mock_print.assert_any_call("Error: User 'bob' not found")
+
+    @patch("src.cli.webbrowser.open", return_value=True)
+    @patch("builtins.print")
+    def test_service_start_background_process(self, mock_print, mock_open):
+        """Service start launches background process and records pid."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 4321
+        mock_proc.is_alive.return_value = True
+
+        with patch.object(self.cli, "_read_pid", return_value=None), patch(
+            "src.cli.multiprocessing.Process", return_value=mock_proc
+        ) as mock_proc_cls, patch.object(self.cli, "_write_pid_file") as mock_write:
+            exit_code = self.cli.run(["service", "start"])
+
+        self.assertEqual(exit_code, 0)
+        mock_proc_cls.assert_called_once()
+        mock_proc.start.assert_called_once()
+        mock_write.assert_called_once_with(4321)
+        mock_print.assert_any_call("Service started in background (PID 4321).")
+        mock_print.assert_any_call("Dashboard available at http://127.0.0.1:8000")
+        mock_open.assert_called_once_with("http://127.0.0.1:8000", new=2)
+        mock_print.assert_any_call("Opened http://127.0.0.1:8000 in your browser.")
+
+    @patch("src.cli.webbrowser.open")
+    @patch("builtins.print")
+    def test_service_start_auto_open_disabled(self, mock_print, mock_open):
+        self.cli.service.config.set("dashboard", "auto_open", False)
+        mock_proc = MagicMock()
+        mock_proc.pid = 55
+        mock_proc.is_alive.return_value = True
+
+        with patch.object(self.cli, "_read_pid", return_value=None), patch(
+            "src.cli.multiprocessing.Process", return_value=mock_proc
+        ), patch.object(self.cli, "_write_pid_file"), patch.object(
+            self.cli, "_maybe_start_dashboard"
+        ):
+            exit_code = self.cli.run(["service", "start"])
+
+        self.assertEqual(exit_code, 0)
+        mock_open.assert_not_called()
+        mock_print.assert_any_call("Dashboard available at http://127.0.0.1:8000")
+
+    @patch("src.cli.webbrowser.open", return_value=False)
+    @patch("builtins.print")
+    def test_service_start_auto_start_dashboard(self, mock_print, _mock_open):
+        self.cli.service.config.set("dashboard", "auto_start", True)
+        service_proc = MagicMock()
+        service_proc.pid = 600
+        service_proc.is_alive.return_value = True
+        dash_proc = MagicMock()
+        dash_proc.pid = 601
+        dash_proc.is_alive.return_value = True
+
+        with patch.object(self.cli, "_read_pid", return_value=None), patch(
+            "src.cli.multiprocessing.Process", side_effect=[service_proc, dash_proc]
+        ) as mock_process, patch.object(
+            self.cli, "_write_pid_file"
+        ) as mock_write_pid, patch.object(
+            self.cli, "_write_dashboard_pid"
+        ) as mock_write_dash:
+            exit_code = self.cli.run(["service", "start"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(mock_process.call_count, 2)
+        mock_write_pid.assert_called_once_with(600)
+        mock_write_dash.assert_called_once_with(601)
+        mock_print.assert_any_call("Dashboard started in background (PID 601).")
+
+    @patch("builtins.print")
+    def test_service_start_when_already_running(self, mock_print):
+        with patch.object(self.cli, "_read_pid", return_value=101), patch.object(
+            self.cli, "_is_pid_running", return_value=True
+        ), patch("src.cli.multiprocessing.Process") as mock_proc_cls:
+            exit_code = self.cli.run(["service", "start"])
+
+        self.assertEqual(exit_code, 0)
+        mock_proc_cls.assert_not_called()
+        mock_print.assert_any_call("Service already running (PID 101)")
+
+    @patch("builtins.print")
+    def test_service_stop_running(self, mock_print):
+        with patch.object(self.cli, "_read_pid", return_value=202), patch.object(
+            self.cli, "_is_pid_running", side_effect=[True, True, False, False]
+        ) as mock_running, patch("src.cli.os.kill") as mock_kill, patch.object(
+            self.cli, "_remove_pid_file"
+        ) as mock_remove, patch(
+            "src.cli.time.sleep"
+        ), patch.object(
+            self.cli, "_stop_dashboard_process"
+        ) as mock_stop_dash:
+            exit_code = self.cli.run(["service", "stop"])
+
+        self.assertEqual(exit_code, 0)
+        mock_kill.assert_called_once()
+        self.assertGreaterEqual(mock_running.call_count, 3)
+        mock_remove.assert_called_once()
+        mock_stop_dash.assert_called_once()
+        mock_print.assert_any_call("Service stopped")
+
+    @patch("builtins.print")
+    def test_service_stop_not_running(self, mock_print):
+        with patch.object(self.cli, "_read_pid", return_value=None), patch.object(
+            self.cli, "_remove_pid_file"
+        ) as mock_remove, patch.object(
+            self.cli, "_maybe_cleanup_dashboard"
+        ) as mock_cleanup:
+            exit_code = self.cli.run(["service", "stop"])
+
+        self.assertEqual(exit_code, 0)
+        mock_remove.assert_called_once()
+        mock_cleanup.assert_called_once()
+        mock_print.assert_any_call("Service is not running")
+
+    @patch("builtins.print")
+    def test_service_status_running(self, mock_print):
+        """Status should report running when pid is alive."""
+        with patch.object(self.cli, "_read_pid", return_value=123), patch.object(
+            self.cli, "_is_pid_running", return_value=True
+        ), patch.object(self.cli, "_read_dashboard_pid", return_value=None):
+            exit_code = self.cli.run(["service", "status"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("Service is running (PID 123)")
+
+    @patch("builtins.print")
+    def test_service_status_not_running_cleans_pid(self, mock_print):
+        """Status clears stale pid files when process is gone."""
+        with patch.object(self.cli, "_read_pid", return_value=999), patch.object(
+            self.cli, "_is_pid_running", return_value=False
+        ), patch.object(self.cli, "_remove_pid_file") as mock_remove, patch.object(
+            self.cli, "_read_dashboard_pid", return_value=None
+        ):
+            exit_code = self.cli.run(["service", "status"])
+
+        self.assertEqual(exit_code, 0)
+        mock_remove.assert_called_once()
+        mock_print.assert_any_call("Service is not running")
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ class CIService:
         self.monitor_thread: Optional[threading.Thread] = None
         self.data = DataAccess(self.db_path)
         self.data.initialize_schema()
+        self._bootstrap_dogfood_repository()
         logger.info("CI Service initialized")
 
     def _create_test_run(
@@ -89,6 +90,106 @@ class CIService:
     @staticmethod
     def _hash_secret(secret: str) -> str:
         return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized:
+                return default
+            return normalized not in {"0", "false", "no", "off"}
+        return default
+
+    def _bootstrap_dogfood_repository(self) -> None:
+        dogfood_config = self.config.get("dogfood") or {}
+
+        env_flag = os.getenv("FULL_AUTO_CI_DOGFOOD")
+        enabled = (
+            self._coerce_bool(env_flag)
+            if env_flag is not None
+            else self._coerce_bool(dogfood_config.get("enabled"))
+        )
+
+        if not enabled:
+            logger.debug("Dogfooding disabled via configuration")
+            return
+
+        repo_url = (
+            os.getenv("FULL_AUTO_CI_REPO_URL")
+            or dogfood_config.get("url")
+            or "https://github.com/calvinloveland/full-auto-ci.git"
+        )
+        repo_name = (
+            os.getenv("FULL_AUTO_CI_REPO_NAME")
+            or dogfood_config.get("name")
+            or "Full Auto CI"
+        )
+        repo_branch = (
+            os.getenv("FULL_AUTO_CI_REPO_BRANCH")
+            or dogfood_config.get("branch")
+            or "main"
+        )
+
+        repositories = self.list_repositories()
+        existing = next(
+            (repo for repo in repositories if repo["url"] == repo_url), None
+        )
+
+        if existing:
+            repo_id = existing["id"]
+            logger.info("Dogfooding repository already registered (ID %s)", repo_id)
+        else:
+            logger.info(
+                "Registering dogfooding repository %s (%s)", repo_name, repo_url
+            )
+            repo_id = self.add_repository(repo_name, repo_url, repo_branch)
+            if not repo_id:
+                logger.error("Failed to register dogfooding repository %s", repo_url)
+                return
+
+        queue_flag = os.getenv("FULL_AUTO_CI_DOGFOOD_QUEUE")
+        queue_on_start = (
+            self._coerce_bool(queue_flag, True)
+            if queue_flag is not None
+            else self._coerce_bool(dogfood_config.get("queue_on_start"), True)
+        )
+
+        if not queue_on_start:
+            logger.debug("Skipping automatic dogfood run queueing")
+            return
+
+        repo = self.git_tracker.get_repository(repo_id)
+        if not repo:
+            logger.debug(
+                "Dogfooding repository %s not yet available in git tracker", repo_id
+            )
+            return
+
+        latest_commit = repo.get_latest_commit()
+        if not latest_commit:
+            if not repo.pull():
+                logger.debug(
+                    "Unable to sync dogfooding repository %s for initial run", repo_id
+                )
+                return
+            latest_commit = repo.get_latest_commit()
+
+        if not latest_commit:
+            logger.debug("No commits available to queue for dogfooding repository")
+            return
+
+        if self._enqueue_commit(repo_id, latest_commit["hash"], latest_commit):
+            logger.info(
+                "Queued latest dogfood commit %s for repository ID %s",
+                latest_commit["hash"][0:7],
+                repo_id,
+            )
 
     def _create_or_get_pending_test_run(
         self, repo_id: int, commit_hash: str

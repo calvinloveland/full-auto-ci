@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}{{ repository.name }} · Full Auto CI{% endblock %}
+
+{% block content %}
+<section class="section">
+  <div class="section-header">
+    <div>
+      <h2>{{ repository.name }}</h2>
+      <p><a href="{{ repository.url }}" target="_blank" rel="noopener">{{ repository.url }}</a></p>
+    </div>
+    <div class="section-actions">
+      <button class="btn btn-ghost" type="button"
+        hx-get="{{ url_for('dashboard.repository_insights', repo_id=repository.id) }}" hx-target="#repo-insights"
+        hx-swap="innerHTML">
+        Refresh now
+      </button>
+      <span id="repo-refresh-indicator" class="hx-indicator" aria-hidden="true">Updating…</span>
+    </div>
+  </div>
+  <div id="repo-insights" class="repo-insights"
+    hx-get="{{ url_for('dashboard.repository_insights', repo_id=repository.id) }}" hx-trigger="load, every 12s"
+    hx-target="#repo-insights" hx-swap="innerHTML" hx-indicator="#repo-refresh-indicator">
+    {% include "partials/repository_insights.html" %}
+  </div>
+</section>
+{% endblock %}

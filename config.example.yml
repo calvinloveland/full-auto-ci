@@ -10,6 +10,14 @@ api:
   host: "0.0.0.0"  # Listen on all interfaces
   port: 5000
   debug: false
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8000
+  debug: false
+  secret_key: null
+  auto_open: true
+  auto_start: true
   
 tools:
   pylint:
@@ -33,3 +41,10 @@ repositories:
         - "admin@example.com"
       slack:
         webhook: "https://hooks.slack.com/services/XXXXXXXXX/YYYYYYYYY/ZZZZZZZZZZZZZZZZZZZZZZZZ"
+
+dogfood:
+  enabled: false
+  name: "Full Auto CI"
+  url: "https://github.com/calvinloveland/full-auto-ci.git"
+  branch: "main"
+  queue_on_start: true

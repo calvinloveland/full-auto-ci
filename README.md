@@ -52,10 +52,18 @@ Start the service:
 full-auto-ci service start
 ```
 
+The command launches the service in a background process, prints the dashboard URL (defaults to `http://127.0.0.1:8000` unless overridden via `dashboard.host`/`dashboard.port` in `~/.fullautoci/config.yml`), and—when possible—opens it in your default browser. A PID file is stored under the Full Auto CI data directory (`service.pid`) so you can inspect or stop the process later. Disable the auto-open behavior by setting `dashboard.auto_open: false` in your config or by exporting `FULL_AUTO_CI_OPEN_BROWSER=0`.
+
 Check the status:
 
 ```bash
 full-auto-ci service status
+```
+
+Stop the service:
+
+```bash
+full-auto-ci service stop
 ```
 
 Add a repository:
@@ -109,6 +117,40 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e ".[api,dashboard,dev]"
 ```
+
+### Running the dashboard
+
+The Flask-powered dashboard provides a quick status view of repositories and recent test runs:
+
+```bash
+python -m src.dashboard
+```
+
+By default the dashboard listens on `http://127.0.0.1:8000`. Configure host/port in `~/.fullautoci/config.yml` under the `dashboard` section.
+
+### Dogfooding the project
+
+The dev container initialization script automatically registers this repository so the service can test itself. To customise:
+
+- `FULL_AUTO_CI_DOGFOOD=0` — skip registration
+- `FULL_AUTO_CI_REPO_URL` — override repository URL
+- `FULL_AUTO_CI_REPO_BRANCH` — override branch (default `main`)
+- `FULL_AUTO_CI_REPO_NAME` — change display name
+
+You can also enable always-on dogfooding directly from configuration by setting the `dogfood` section either in `~/.fullautoci/config.yml` or via the dev container config:
+
+```yaml
+dogfood:
+	enabled: true
+	name: "Full Auto CI"
+	url: "https://github.com/calvinloveland/full-auto-ci.git"
+	branch: "main"
+	queue_on_start: true  # queue the latest commit immediately
+```
+
+When enabled, the service will ensure the repository is registered on startup and automatically queue the latest commit for testing unless `queue_on_start` is set to `false` (or `FULL_AUTO_CI_DOGFOOD_QUEUE=0`).
+
+Set these variables before starting the container or rerun `.devcontainer/init_dev_env.sh` after adjusting them.
 
 ### Run tests
 

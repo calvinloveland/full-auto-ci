@@ -347,6 +347,120 @@ class DataAccess:
                 params,
             )
 
+    def summarize_test_runs(self, repo_id: int) -> Dict[str, int]:
+        """Return counts of test runs by status for a repository."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM test_runs
+                WHERE repository_id = ?
+                GROUP BY status
+                """,
+                (repo_id,),
+            )
+            rows = cursor.fetchall()
+
+        return {row[0]: int(row[1]) for row in rows}
+
+    def fetch_recent_test_runs(
+        self, repo_id: int, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent test runs for a repository."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, commit_hash, status, created_at, started_at, completed_at, error
+                FROM test_runs
+                WHERE repository_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (repo_id, limit),
+            )
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "id": int(row[0]),
+                "commit_hash": row[1],
+                "status": row[2],
+                "created_at": row[3],
+                "started_at": row[4],
+                "completed_at": row[5],
+                "error": row[6],
+            }
+            for row in rows
+        ]
+
+    def fetch_commit_for_test_run(
+        self, test_run_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch commit metadata associated with a test run."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT c.id, c.commit_hash, c.author, c.message, c.timestamp, c.repository_id
+                FROM commits c
+                JOIN test_runs tr
+                  ON tr.repository_id = c.repository_id
+                 AND tr.commit_hash = c.commit_hash
+                WHERE tr.id = ?
+                LIMIT 1
+                """,
+                (test_run_id,),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "id": int(row[0]),
+            "hash": row[1],
+            "author": row[2],
+            "message": row[3],
+            "timestamp": row[4],
+            "repository_id": row[5],
+        }
+
+    def fetch_results_for_test_run(
+        self, test_run_id: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch tool results for a specific test run."""
+        commit = self.fetch_commit_for_test_run(test_run_id)
+        if not commit or commit.get("id") is None:
+            return []
+
+        commit_id = commit["id"]
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT tool, status, output, duration, created_at
+                FROM results
+                WHERE commit_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (commit_id,),
+            )
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "tool": row[0],
+                "status": row[1],
+                "output": row[2],
+                "duration": row[3],
+                "created_at": row[4],
+            }
+            for row in rows
+        ]
+
     # User management helpers
 
     def create_user(

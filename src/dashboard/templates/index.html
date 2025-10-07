@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Repositories · Full Auto CI{% endblock %}
+
+{% block content %}
+<section class="section">
+  <div class="section-header">
+    <h2>Repositories</h2>
+    <p>Overview of all repositories currently tracked by Full Auto CI.</p>
+  </div>
+  <div id="repository-overview" hx-get="{{ url_for('dashboard.repositories_partial') }}" hx-trigger="load, every 15s"
+    hx-target="#repository-overview" hx-swap="innerHTML">
+    {% include "partials/repositories_overview.html" %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,68 @@
+<div class="status-overview">
+    <div class="status-card">
+        <span class="status-label">Repositories</span>
+        <strong>{{ overview.total | default(0) }}</strong>
+    </div>
+    <div class="status-card status-card--success">
+        <span class="status-label">Passing</span>
+        <strong>{{ overview.passing | default(0) }}</strong>
+    </div>
+    <div class="status-card status-card--running">
+        <span class="status-label">Running</span>
+        <strong>{{ overview.running | default(0) }}</strong>
+    </div>
+    <div class="status-card status-card--queued">
+        <span class="status-label">Queued</span>
+        <strong>{{ overview.queued | default(0) }}</strong>
+    </div>
+    <div class="status-card status-card--error">
+        <span class="status-label">Failing</span>
+        <strong>{{ overview.failing | default(0) }}</strong>
+    </div>
+</div>
+
+{% if not repositories %}
+<div class="empty-state empty-state--full">
+    <p>No repositories have been added yet. Add one using the CLI:</p>
+    <pre><code>full-auto-ci repo add "My Project" https://github.com/example/repo.git</code></pre>
+</div>
+{% else %}
+<div class="card-grid">
+    {% for repo in repositories %}
+    <article class="card" data-repo-id="{{ repo.id }}">
+        <header class="card-header">
+            <h3><a href="{{ url_for('dashboard.repository_detail', repo_id=repo.id) }}">{{ repo.name }}</a></h3>
+            <span class="status-pill {{ repo.latest_status | status_class }}">
+                {{ repo.latest_status or "no runs" }}
+            </span>
+        </header>
+        <div class="card-body">
+            <dl class="meta-list">
+                <div>
+                    <dt>URL</dt>
+                    <dd><a href="{{ repo.url }}" target="_blank" rel="noopener">{{ repo.url }}</a></dd>
+                </div>
+                <div>
+                    <dt>Branch</dt>
+                    <dd>{{ repo.branch }}</dd>
+                </div>
+                <div>
+                    <dt>Last run</dt>
+                    <dd>{{ repo.latest_run.created_at | timeago if repo.latest_run else "Never" }}</dd>
+                </div>
+            </dl>
+            {% if repo.summary %}
+            <div class="status-summary">
+                {% for status, count in repo.summary.items() %}
+                <span class="summary-chip {{ status | status_class }}">{{ status }}: {{ count }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        <footer class="card-footer">
+            <a class="btn" href="{{ url_for('dashboard.repository_detail', repo_id=repo.id) }}">View details</a>
+        </footer>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}

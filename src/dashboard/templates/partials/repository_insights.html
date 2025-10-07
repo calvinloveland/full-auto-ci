@@ -1,0 +1,106 @@
+{% set current_status = last_run.status if last_run else None %}
+
+<div class="repo-meta">
+    <div>
+        <strong>Branch</strong>
+        <span>{{ repository.branch }}</span>
+    </div>
+    <div>
+        <strong>Last run</strong>
+        <span>{% if last_run %}{{ last_run.created_at | timeago }}{% else %}Never{% endif %}</span>
+    </div>
+    <div>
+        <strong>Status</strong>
+        <span class="status-pill {{ current_status | status_class }}">
+            {{ current_status or "no runs" }}
+        </span>
+    </div>
+</div>
+
+{% if summary %}
+<div class="status-summary status-summary--wrap">
+    {% for status, count in summary.items() %}
+    <span class="summary-chip {{ status | status_class }}">{{ status }}: {{ count }}</span>
+    {% endfor %}
+</div>
+{% endif %}
+
+<section class="section">
+    <header class="section-subheader">
+        <h3>Recent Test Runs</h3>
+        <form method="post" action="{{ url_for('dashboard.rerun_test', repo_id=repository.id) }}">
+            <label for="commit_hash">Queue tests for commit:</label>
+            <input type="text" id="commit_hash" name="commit_hash" placeholder="Commit hash" required />
+            <button type="submit" class="btn btn-primary">Queue run</button>
+        </form>
+    </header>
+
+    {% if not test_runs %}
+    <div class="empty-state">
+        <p>No test runs recorded yet.</p>
+    </div>
+    {% else %}
+    <div class="timeline">
+        {% for run in test_runs %}
+        <article class="timeline-item">
+            <header>
+                <div class="run-meta">
+                    <span class="status-pill {{ run.status | status_class }}">{{ run.status }}</span>
+                    <span class="timestamp">Queued {{ run.created_at | timeago }}</span>
+                    {% if run.started_at %}
+                    <span class="timestamp">Started {{ run.started_at | timeago }}</span>
+                    {% endif %}
+                    {% if run.completed_at %}
+                    <span class="timestamp">Completed {{ run.completed_at | timeago }}</span>
+                    {% endif %}
+                </div>
+                {% if run.commit %}
+                <h4>
+                    Commit <code>{{ run.commit.hash[:7] }}</code>
+                    {% if run.commit.message %}
+                    · {{ run.commit.message }}
+                    {% endif %}
+                </h4>
+                <p class="commit-meta">{{ run.commit.author or "Unknown author" }}</p>
+                {% else %}
+                <h4>Commit {{ run.commit_hash[:7] }}</h4>
+                {% endif %}
+            </header>
+
+            <div class="results-grid">
+                {% if run.results %}
+                {% for result in run.results %}
+                <div class="result-card">
+                    <header>
+                        <strong>{{ result.tool }}</strong>
+                        <span class="status-pill {{ result.status | status_class }}">{{ result.status }}</span>
+                    </header>
+                    <div class="result-body">
+                        {% if result.duration %}
+                        <p><strong>Duration:</strong> {{ '%.2f'|format(result.duration) }}s</p>
+                        {% endif %}
+                        {% if result.output %}
+                        <details>
+                            <summary>Output</summary>
+                            <pre>{{ result.output }}</pre>
+                        </details>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <p class="empty-state">No tool results captured.</p>
+                {% endif %}
+            </div>
+
+            {% if run.error %}
+            <div class="error-box">
+                <strong>Error:</strong>
+                <pre>{{ run.error }}</pre>
+            </div>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+    {% endif %}
+</section>

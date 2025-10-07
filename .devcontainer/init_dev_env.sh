@@ -20,13 +20,34 @@ mkdir -p ~/.fullautoci/backups
 
 # Initialize the database
 python -c "
-import sqlite3
 import os
 import sys
 sys.path.append('/workspaces/full_auto_ci')
 from src.service import CIService
+
 service = CIService()
-print('✅ Database initialized at', os.path.expanduser('~/.fullautoci/database.sqlite'))
+db_path = os.path.expanduser('~/.fullautoci/database.sqlite')
+
+print('✅ Database initialized at', db_path)
+
+dogfood_enabled = os.getenv('FULL_AUTO_CI_DOGFOOD', '1').lower() not in {'0', 'false', 'no'}
+if dogfood_enabled:
+    repo_url = os.getenv('FULL_AUTO_CI_REPO_URL', 'https://github.com/calvinloveland/full-auto-ci.git')
+    repo_name = os.getenv('FULL_AUTO_CI_REPO_NAME', 'Full Auto CI')
+    repo_branch = os.getenv('FULL_AUTO_CI_REPO_BRANCH', 'main')
+
+    existing = [repo for repo in service.list_repositories() if repo['url'] == repo_url]
+    if existing:
+        repo_id = existing[0]['id']
+        print(f'ℹ️ Dogfooding repository already registered (ID {repo_id})')
+    else:
+        repo_id = service.add_repository(repo_name, repo_url, repo_branch)
+        if repo_id:
+            print(f'✅ Dogfooding repository registered (ID {repo_id})')
+        else:
+            print('⚠️ Failed to register dogfooding repository. Check logs for details.')
+else:
+    print('ℹ️ Skipping dogfooding repository registration (FULL_AUTO_CI_DOGFOOD disabled)')
 "
 
 echo ""

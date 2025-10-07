@@ -31,18 +31,22 @@
 - [ ] Improve test coverage
   - [ ] Integration tests
   - [ ] End-to-end tests
+  - [ ] use selenium or another tool for testing UI
 
 ### Phase 2 (Coming Soon)
 
 - [ ] Implement Flask web dashboard
-  - [ ] Set up basic Flask application
-  - [ ] Create dashboard templates with Jinja2
-  - [ ] Add HTMX for dynamic content
+  - [x] Set up basic Flask application
+  - [x] Create dashboard templates with Jinja2
+  - [x] Add HTMX for dynamic content
   - [ ] Implement authentication and session management
 
 - [ ] Add visualization for test results
   - [ ] Historical trends
   - [ ] Commit-by-commit comparison
+
+- [ ] Add MCP server
+  - [ ] FILL OUT THESE CHECKMARKS
 
 ### Phase 3 (Future)
 

@@ -3,9 +3,15 @@
 import argparse
 import json
 import logging
+import multiprocessing
+import os
+import signal
 import sys
-from typing import Any, List, Optional
+import time
+import webbrowser
+from typing import Any, Dict, List, Optional
 
+from .dashboard import create_app
 from .service import CIService
 
 # Configure logging
@@ -13,6 +19,45 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _run_service_process(config_path: Optional[str], db_path: Optional[str]) -> None:
+    """Entry point for the background service process."""
+
+    service = CIService(config_path=config_path, db_path=db_path)
+
+    def _shutdown_handler(_signum, _frame):
+        logging.getLogger(__name__).info("Shutdown signal received; stopping service")
+        service.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
+    service.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop()
+
+
+def _run_dashboard_process(config_path: Optional[str], db_path: Optional[str]) -> None:
+    app = create_app(config_path=config_path, db_path=db_path)
+    service = app.config["CI_SERVICE"]
+    dashboard_cfg = service.config.get("dashboard") or {}
+
+    host = str(dashboard_cfg.get("host", "127.0.0.1"))
+    port = int(dashboard_cfg.get("port", 8000) or 8000)
+    debug = bool(dashboard_cfg.get("debug", False))
+
+    logger.info("Starting dashboard on %s:%s", host, port)
+    try:
+        app.run(host=host, port=port, debug=debug, use_reloader=False)
+    finally:
+        logger.info("Dashboard process exiting")
 
 
 class CLI:
@@ -165,18 +210,81 @@ class CLI:
             Exit code
         """
         if args.service_command == "start":
-            self.service.start()
-            print("Service started")
+            existing_pid = self._read_pid()
+            if existing_pid and self._is_pid_running(existing_pid):
+                print(f"Service already running (PID {existing_pid})")
+                return 0
+
+            dashboard_cfg = self.service.config.get("dashboard") or {}
+            host = str(dashboard_cfg.get("host", "127.0.0.1"))
+            port = dashboard_cfg.get("port", 8000)
+            visible_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+            dashboard_url = f"http://{visible_host}:{port}"
+
+            process = multiprocessing.Process(
+                target=_run_service_process,
+                args=(self.service.config.config_path, self.service.db_path),
+                daemon=False,
+            )
+            process.start()
+            time.sleep(0.5)
+
+            if not process.is_alive():
+                print("Error: Service failed to start. Check logs for details.")
+                return 1
+
+            self._write_pid_file(process.pid)
+            print(f"Service started in background (PID {process.pid}).")
+            print(f"Dashboard available at {dashboard_url}")
+            self._maybe_start_dashboard(dashboard_cfg)
+            self._maybe_open_dashboard(dashboard_url, dashboard_cfg)
             return 0
         elif args.service_command == "stop":
-            self.service.stop()
+            pid = self._read_pid()
+            if not pid:
+                print("Service is not running")
+                self._remove_pid_file()
+                self._maybe_cleanup_dashboard()
+                return 0
+
+            if not self._is_pid_running(pid):
+                print("Service is not running")
+                self._remove_pid_file()
+                self._maybe_cleanup_dashboard()
+                return 0
+
+            print(f"Stopping service (PID {pid})...")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError as error:
+                logger.error("Failed to signal service process %s: %s", pid, error)
+                return 1
+
+            waited = 0.0
+            while self._is_pid_running(pid) and waited < 10.0:
+                time.sleep(0.2)
+                waited += 0.2
+
+            if self._is_pid_running(pid):
+                print(f"Service did not terminate in time (PID {pid})")
+                return 1
+
+            self._remove_pid_file()
+            self._stop_dashboard_process()
             print("Service stopped")
             return 0
         elif args.service_command == "status":
-            if hasattr(self.service, "running") and self.service.running:
-                print("Service is running")
+            pid = self._read_pid()
+            if pid and self._is_pid_running(pid):
+                print(f"Service is running (PID {pid})")
             else:
                 print("Service is not running")
+                self._remove_pid_file()
+            dashboard_pid = self._read_dashboard_pid()
+            if dashboard_pid and self._is_pid_running(dashboard_pid):
+                print(f"Dashboard is running (PID {dashboard_pid})")
+            elif dashboard_pid:
+                self._remove_dashboard_pid()
             return 0
         else:
             print(f"Error: Unknown service command {args.service_command}")
@@ -365,6 +473,174 @@ class CLI:
                 return int(raw)
             except ValueError:
                 return raw
+
+    def _pid_file_path(self) -> str:
+        base_dir = self.service.config.config.get(
+            "data_directory", os.path.expanduser("~/.fullautoci")
+        )
+        base_dir = os.path.expanduser(str(base_dir))
+        return os.path.join(base_dir, "service.pid")
+
+    def _write_pid_file(self, pid: int) -> None:
+        pid_path = self._pid_file_path()
+        try:
+            os.makedirs(os.path.dirname(pid_path), exist_ok=True)
+            with open(pid_path, "w", encoding="utf-8") as handle:
+                handle.write(str(pid))
+        except OSError as error:
+            logger.warning("Unable to write PID file %s: %s", pid_path, error)
+
+    def _remove_pid_file(self) -> None:
+        pid_path = self._pid_file_path()
+        try:
+            os.remove(pid_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            logger.warning("Unable to remove PID file %s: %s", pid_path, error)
+
+    def _read_pid(self) -> Optional[int]:
+        pid_path = self._pid_file_path()
+        try:
+            with open(pid_path, "r", encoding="utf-8") as handle:
+                return int(handle.read().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_pid_running(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def _dashboard_pid_path(self) -> str:
+        base_dir = self.service.config.config.get(
+            "data_directory", os.path.expanduser("~/.fullautoci")
+        )
+        base_dir = os.path.expanduser(str(base_dir))
+        return os.path.join(base_dir, "dashboard.pid")
+
+    def _write_dashboard_pid(self, pid: int) -> None:
+        pid_path = self._dashboard_pid_path()
+        try:
+            os.makedirs(os.path.dirname(pid_path), exist_ok=True)
+            with open(pid_path, "w", encoding="utf-8") as handle:
+                handle.write(str(pid))
+        except OSError as error:
+            logger.warning("Unable to write dashboard PID file %s: %s", pid_path, error)
+
+    def _remove_dashboard_pid(self) -> None:
+        pid_path = self._dashboard_pid_path()
+        try:
+            os.remove(pid_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            logger.warning(
+                "Unable to remove dashboard PID file %s: %s", pid_path, error
+            )
+
+    def _read_dashboard_pid(self) -> Optional[int]:
+        pid_path = self._dashboard_pid_path()
+        try:
+            with open(pid_path, "r", encoding="utf-8") as handle:
+                return int(handle.read().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _maybe_start_dashboard(self, dashboard_cfg: Dict[str, Any]) -> Optional[int]:
+        env_flag = os.getenv("FULL_AUTO_CI_START_DASHBOARD")
+        if env_flag is not None:
+            auto_start = env_flag.strip().lower() not in {"0", "false", "no"}
+        else:
+            auto_start = bool(dashboard_cfg.get("auto_start", True))
+
+        if not auto_start:
+            return None
+
+        existing_pid = self._read_dashboard_pid()
+        if existing_pid and self._is_pid_running(existing_pid):
+            print(f"Dashboard already running (PID {existing_pid}).")
+            return existing_pid
+        elif existing_pid:
+            self._remove_dashboard_pid()
+
+        process = multiprocessing.Process(
+            target=_run_dashboard_process,
+            args=(self.service.config.config_path, self.service.db_path),
+            daemon=False,
+        )
+        process.start()
+        time.sleep(0.5)
+
+        if not process.is_alive():
+            print("Warning: Dashboard failed to start. Check logs for details.")
+            return None
+
+        self._write_dashboard_pid(process.pid)
+        print(f"Dashboard started in background (PID {process.pid}).")
+        return process.pid
+
+    def _stop_dashboard_process(self) -> None:
+        pid = self._read_dashboard_pid()
+        if not pid:
+            self._remove_dashboard_pid()
+            return
+
+        if not self._is_pid_running(pid):
+            self._remove_dashboard_pid()
+            return
+
+        print(f"Stopping dashboard (PID {pid})...")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as error:
+            logger.warning("Failed to signal dashboard process %s: %s", pid, error)
+            self._remove_dashboard_pid()
+            return
+
+        waited = 0.0
+        while self._is_pid_running(pid) and waited < 5.0:
+            time.sleep(0.2)
+            waited += 0.2
+
+        if self._is_pid_running(pid):
+            print(f"Dashboard did not terminate in time (PID {pid})")
+        else:
+            print("Dashboard stopped")
+            self._remove_dashboard_pid()
+
+    def _maybe_cleanup_dashboard(self) -> None:
+        pid = self._read_dashboard_pid()
+        if pid and not self._is_pid_running(pid):
+            self._remove_dashboard_pid()
+
+    def _maybe_open_dashboard(self, url: str, dashboard_cfg: Dict[str, Any]) -> None:
+        env_flag = os.getenv("FULL_AUTO_CI_OPEN_BROWSER")
+
+        if env_flag is not None:
+            auto_open = env_flag.strip().lower() not in {"0", "false", "no"}
+        else:
+            auto_open = bool(dashboard_cfg.get("auto_open", True))
+
+        if not auto_open:
+            return
+
+        if not bool(dashboard_cfg.get("auto_start", True)):
+            logger.info(
+                "dashboard.auto_start disabled; ensure the server is running before using %s",
+                url,
+            )
+
+        try:
+            if webbrowser.open(url, new=2):
+                print(f"Opened {url} in your browser.")
+            else:
+                logger.info("Browser reported failure to open %s", url)
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning("Unable to open browser for %s: %s", url, error)
 
 
 def main() -> int:
