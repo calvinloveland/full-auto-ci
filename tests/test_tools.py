@@ -1,11 +1,12 @@
 """Tests for the tools module."""
-import unittest
-from unittest.mock import patch, MagicMock
-import tempfile
-import json
-from pathlib import Path
 
-from src.tools import Tool, Pylint, Coverage, ToolRunner
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from src.tools import Coverage, Pylint, Tool, ToolRunner
 
 
 class TestTool(unittest.TestCase):
@@ -109,7 +110,9 @@ class TestPylint(unittest.TestCase):
             package.mkdir(parents=True)
             (package / "__init__.py").write_text("", encoding="utf-8")
 
-            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            targets = self.pylint._discover_targets(
+                tmpdir
+            )  # pylint: disable=protected-access
             self.assertEqual(targets, ["src/full_auto_ci"])
 
     def test_discover_targets_respects_config(self):
@@ -117,7 +120,9 @@ class TestPylint(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             (Path(tmpdir) / ".pylintrc").write_text("", encoding="utf-8")
 
-            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            targets = self.pylint._discover_targets(
+                tmpdir
+            )  # pylint: disable=protected-access
             self.assertEqual(targets, ["."])
 
     def test_discover_targets_falls_back_to_packages(self):
@@ -127,13 +132,17 @@ class TestPylint(unittest.TestCase):
             pkg.mkdir()
             (pkg / "__init__.py").write_text("", encoding="utf-8")
 
-            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            targets = self.pylint._discover_targets(
+                tmpdir
+            )  # pylint: disable=protected-access
             self.assertEqual(targets, ["myapp"])
 
     def test_discover_targets_defaults_to_repo(self):
         """If no obvious directories are found, lint the whole repo."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            targets = self.pylint._discover_targets(
+                tmpdir
+            )  # pylint: disable=protected-access
             self.assertEqual(targets, ["."])
 
 
@@ -171,26 +180,22 @@ class TestCoverage(unittest.TestCase):
 
         # Mock XML parsing
         mock_root = MagicMock()
-        mock_root.get.side_effect = (
-            lambda key, default: "0.85" if key == "line-rate" else default
+        mock_root.get.side_effect = lambda key, default: (
+            "0.85" if key == "line-rate" else default
         )
 
         mock_file1 = MagicMock()
-        mock_file1.get.side_effect = (
-            lambda key, default: "file1.py"
+        mock_file1.get.side_effect = lambda key, default: (
+            "file1.py"
             if key == "filename"
-            else "0.9"
-            if key == "line-rate"
-            else default
+            else "0.9" if key == "line-rate" else default
         )
 
         mock_file2 = MagicMock()
-        mock_file2.get.side_effect = (
-            lambda key, default: "file2.py"
+        mock_file2.get.side_effect = lambda key, default: (
+            "file2.py"
             if key == "filename"
-            else "0.8"
-            if key == "line-rate"
-            else default
+            else "0.8" if key == "line-rate" else default
         )
 
         mock_root.findall.return_value = [mock_file1, mock_file2]

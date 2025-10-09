@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import MagicMock
 
 from src.dashboard import create_app
 from src.db import DataAccess

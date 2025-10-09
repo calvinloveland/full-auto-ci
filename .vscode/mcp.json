@@ -1,17 +1,17 @@
 {
-  "servers": {
-    "full-auto-ci": {
-      "command": "full-auto-ci",
-      "args": [
-        "mcp",
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8765",
-        "--no-token"
-      ],
-      "cwd": "${workspaceFolder}"
+    "servers": {
+        "full-auto-ci": {
+            "command": "full-auto-ci",
+            "args": [
+                "mcp",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8765",
+                "--no-token"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
     }
-  }
 }

@@ -1,15 +1,16 @@
 """REST API for Full Auto CI."""
-import os
-import logging
-import secrets
-from typing import Optional
+
 import hashlib
-import time
+import logging
+import os
+import secrets
 import sqlite3
+import time
+from typing import Optional
 
 # Try to import Flask
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, jsonify, request
 
     FLASK_AVAILABLE = True
 except ImportError:
@@ -434,9 +435,7 @@ class API:
             debug: Whether to run in debug mode
         """
         # self.app.run(host=host, port=port, debug=debug)  # Uncomment when Flask is installed
-        logger.info(
-            "API server would run on %s:%s (debug=%s)", host, port, debug
-        )
+        logger.info("API server would run on %s:%s (debug=%s)", host, port, debug)
         logger.info("Flask is not installed yet, so this is just a placeholder")
 
 

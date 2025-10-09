@@ -1,13 +1,14 @@
 """Webhook handlers for Full Auto CI."""
-import os
-import logging
-import json
-import hmac
+
 import hashlib
+import hmac
+import json
+import logging
+import os
+import sqlite3
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
-import sqlite3
 
 # Configure logging
 logging.basicConfig(
@@ -65,7 +66,9 @@ class WebhookHandler:
         result: Optional[Dict[str, Any]] = None
         try:
             if self.secret and not self._verify_signature(provider, headers, payload):
-                self._abort(logging.WARNING, "Invalid signature for %s webhook", provider)
+                self._abort(
+                    logging.WARNING, "Invalid signature for %s webhook", provider
+                )
 
             handler = self.handlers.get(provider.lower())
             if not handler:

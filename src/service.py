@@ -8,10 +8,9 @@ import queue
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-
-from dataclasses import dataclass, field
 
 from .config import Config
 from .db import DataAccess

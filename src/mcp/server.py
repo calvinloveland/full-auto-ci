@@ -9,8 +9,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from ..service import CIService
 from .. import __version__ as PACKAGE_VERSION
+from ..service import CIService
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class MCPServer:
     async def handle_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """Process a single JSON-RPC message and return the response object."""
 
-        logger.debug("Received MCP message: %s", message)
+        logger.info("MCP request %s (id=%s)", message.get("method"), message.get("id"))
 
         if message.get("jsonrpc") != "2.0":
             raise MCPError(code=-32600, message="Invalid JSON-RPC version")
@@ -86,7 +86,11 @@ class MCPServer:
             raise MCPError(code=-32000, message=str(exc)) from exc
 
         response = {"jsonrpc": "2.0", "id": message.get("id"), "result": result}
-        logger.debug("Responding to MCP message %s", response)
+        logger.info(
+            "MCP response for %s (id=%s)",
+            method,
+            message.get("id"),
+        )
         return response
 
     async def _handle_handshake(self, _params: Dict[str, Any]) -> Dict[str, Any]:
@@ -103,7 +107,9 @@ class MCPServer:
 
         protocol_version = params.get("protocolVersion")
         if not isinstance(protocol_version, str) or not protocol_version:
-            raise MCPError(code=-32602, message="protocolVersion must be a non-empty string")
+            raise MCPError(
+                code=-32602, message="protocolVersion must be a non-empty string"
+            )
 
         client_info = params.get("clientInfo")
         if not isinstance(client_info, dict):
@@ -123,7 +129,7 @@ class MCPServer:
         else:
             negotiated_version = protocol_version
 
-        return {
+        response = {
             "protocolVersion": negotiated_version,
             "serverInfo": {
                 "name": "full-auto-ci",
@@ -135,6 +141,13 @@ class MCPServer:
                 "queueTestRun, and getLatestResults methods."
             ),
         }
+        logger.info(
+            "Completed initialize handshake (client=%s %s, protocol=%s)",
+            client_info.get("name"),
+            client_info.get("version"),
+            response["protocolVersion"],
+        )
+        return response
 
     async def _handle_list_repositories(
         self, _params: Dict[str, Any]
@@ -195,6 +208,7 @@ class MCPServer:
                             "authToken"
                         )
         if provided != self.auth_token:
+            logger.warning("MCP authentication failed for method %s", method)
             raise MCPError(code=-32604, message="Unauthorized")
 
     async def serve_tcp(
@@ -211,22 +225,32 @@ class MCPServer:
             logger.info("MCP client connected: %s", peer)
             try:
                 while True:
-                    data = await reader.readline()
-                    if not data:
-                        break
                     try:
-                        message = json.loads(data.decode("utf-8"))
+                        raw_message, framing = await self._read_transport_message(
+                            reader
+                        )
+                    except MCPError as transport_error:
+                        encoded = self._encode_message(
+                            self._error_response(None, transport_error), "newline"
+                        )
+                        writer.write(encoded)
+                        await writer.drain()
+                        continue
+                    if raw_message is None:
+                        break
+                    logger.info("Raw MCP payload (%s): %s", framing, raw_message)
+                    try:
+                        message = json.loads(raw_message)
                     except json.JSONDecodeError as exc:
                         error = MCPError(
                             code=-32700,
                             message="Parse error",
                             data={"detail": str(exc)},
                         )
-                        writer.write(
-                            (
-                                json.dumps(self._error_response(None, error)) + "\n"
-                            ).encode("utf-8")
+                        encoded = self._encode_message(
+                            self._error_response(None, error), framing
                         )
+                        writer.write(encoded)
                         await writer.drain()
                         continue
 
@@ -234,7 +258,8 @@ class MCPServer:
                         response = await self.handle_message(message)
                     except MCPError as mcp_error:
                         response = self._error_response(message.get("id"), mcp_error)
-                    writer.write((json.dumps(response) + "\n").encode("utf-8"))
+                    encoded = self._encode_message(response, framing)
+                    writer.write(encoded)
                     await writer.drain()
             finally:
                 writer.close()
@@ -263,6 +288,58 @@ class MCPServer:
         """Return a JSON-RPC error response payload."""
 
         return {"jsonrpc": "2.0", "id": message_id, "error": error.to_dict()}
+
+    @staticmethod
+    async def _read_transport_message(
+        reader: asyncio.StreamReader,
+    ) -> tuple[Optional[str], str]:
+        """Read a JSON message supporting newline and content-length framing."""
+
+        while True:
+            line = await reader.readline()
+            if not line:
+                return None, "newline"
+            if line in {b"\r\n", b"\n", b""}:
+                continue
+            break
+
+        if line.lower().startswith(b"content-length:"):
+            try:
+                length = int(line.split(b":", 1)[1].strip())
+            except ValueError as exc:  # pragma: no cover - malformed client
+                raise MCPError(
+                    code=-32600,
+                    message="Invalid Content-Length header",
+                    data={"detail": line.decode("utf-8", errors="replace")},
+                ) from exc
+
+            while True:
+                separator = await reader.readline()
+                if not separator:
+                    return None, "content-length"
+                if separator in {b"\r\n", b"\n", b""}:
+                    break
+
+            body = await reader.readexactly(length)
+            return body.decode("utf-8"), "content-length"
+
+        buffer = line
+        while not buffer.rstrip().endswith(b"}"):
+            more = await reader.readline()
+            if not more:
+                break
+            buffer += more
+        return buffer.decode("utf-8").strip(), "newline"
+
+    @staticmethod
+    def _encode_message(message: Dict[str, Any], framing: str) -> bytes:
+        """Serialize ``message`` using the provided framing mode."""
+
+        payload = json.dumps(message)
+        if framing == "content-length":
+            header = f"Content-Length: {len(payload.encode('utf-8'))}\r\n\r\n"
+            return (header + payload).encode("utf-8")
+        return (payload + "\n").encode("utf-8")
 
     @staticmethod
     def _legacy_capabilities() -> List[Dict[str, str]]:

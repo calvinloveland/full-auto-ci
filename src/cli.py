@@ -373,9 +373,7 @@ class CLI:
                 await server.serve_tcp(host=host, port=port)
             except OSError as exc:  # pragma: no cover - depends on environment
                 if exc.errno == errno.EADDRINUSE:
-                    print(
-                        f"Error: MCP server port {host}:{port} is already in use."
-                    )
+                    print(f"Error: MCP server port {host}:{port} is already in use.")
                     return
                 raise
             except asyncio.CancelledError:  # pragma: no cover

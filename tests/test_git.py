@@ -1,10 +1,11 @@
 """Tests for the git module."""
+
 import os
-import tempfile
-import unittest
-from unittest.mock import patch, MagicMock
 import shutil
 import sqlite3
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
 
 from src.git import GitRepo, GitTracker, RepositoryConfig
 

@@ -68,9 +68,7 @@ class GitRepo:
             logger.info("Cloned repository %s to %s", self.name, self.repo_path)
             return True
         except subprocess.CalledProcessError as error:
-            logger.error(
-                "Failed to clone repository %s: %s", self.name, error
-            )
+            logger.error("Failed to clone repository %s: %s", self.name, error)
             logger.error("Stdout: %s", error.stdout)
             logger.error("Stderr: %s", error.stderr)
             return False
@@ -106,9 +104,7 @@ class GitRepo:
             logger.info("Pulled latest changes for repository %s", self.name)
             return True
         except subprocess.CalledProcessError as error:
-            logger.error(
-                "Failed to pull repository %s: %s", self.name, error
-            )
+            logger.error("Failed to pull repository %s: %s", self.name, error)
             logger.error("Stdout: %s", error.stdout)
             logger.error("Stderr: %s", error.stderr)
             return False
@@ -436,9 +432,7 @@ class GitTracker:
                             self._store_commit(commit)
                         new_commits[repo_id] = commits
             except Exception:  # pylint: disable=broad-exception-caught
-                logger.exception(
-                    "Error checking for updates in repository %s", repo_id
-                )
+                logger.exception("Error checking for updates in repository %s", repo_id)
 
         return new_commits
 

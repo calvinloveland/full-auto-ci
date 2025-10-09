@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -254,6 +255,44 @@ def test_initialize_requires_token_when_configured(dummy_service):
         )
     )
     assert response["result"]["serverInfo"]["name"] == "full-auto-ci"
+
+
+def test_transport_reader_handles_content_length():
+    async def _run():
+        reader = asyncio.StreamReader()
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        raw = json.dumps(payload).encode("utf-8")
+        reader.feed_data(f"Content-Length: {len(raw)}\r\n\r\n".encode("utf-8") + raw)
+        reader.feed_eof()
+
+        data, framing = await MCPServer._read_transport_message(reader)
+        assert framing == "content-length"
+        assert json.loads(data) == payload
+
+    asyncio.run(_run())
+
+
+def test_transport_reader_handles_newline():
+    async def _run():
+        reader = asyncio.StreamReader()
+        payload = {"jsonrpc": "2.0", "id": 2, "method": "handshake"}
+        reader.feed_data((json.dumps(payload) + "\n").encode("utf-8"))
+        reader.feed_eof()
+
+        data, framing = await MCPServer._read_transport_message(reader)
+        assert framing == "newline"
+        assert json.loads(data) == payload
+
+    asyncio.run(_run())
+
+
+def test_encode_message_content_length_round_trip():
+    payload = {"jsonrpc": "2.0", "id": 3, "result": {}}
+    encoded = MCPServer._encode_message(payload, "content-length")
+    header, body = encoded.split(b"\r\n\r\n", 1)
+    assert header.startswith(b"Content-Length: ")
+    assert int(header.split(b": ")[1]) == len(body)
+    assert json.loads(body.decode("utf-8")) == payload
 
 
 def test_unknown_method_raises(dummy_service):

@@ -468,7 +468,16 @@ class TestCLI(unittest.TestCase):
     def test_mcp_serve_rejects_when_token_mismatch(self, mock_print):
         with patch.object(self.cli, "_probe_mcp_server", return_value="unauthorized"):
             exit_code = self.cli.run(
-                ["mcp", "serve", "--host", "127.0.0.1", "--port", "8765", "--token", "tok"]
+                [
+                    "mcp",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8765",
+                    "--token",
+                    "tok",
+                ]
             )
 
         self.assertEqual(exit_code, 1)

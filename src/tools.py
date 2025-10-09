@@ -1,10 +1,11 @@
 """Tools for code analysis and testing."""
-import os
-import logging
-import subprocess
-from typing import Dict, List, Any, Optional
+
 import json
+import logging
+import os
+import subprocess
 import xml.etree.ElementTree as ET
+from typing import Any, Dict, List, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -104,9 +105,7 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                     logger.error("Failed to parse Pylint JSON output")
                     return {"status": "error", "error": "Failed to parse Pylint output"}
             else:
-                logger.error(
-                    "Pylint failed with return code %s", process.returncode
-                )
+                logger.error("Pylint failed with return code %s", process.returncode)
                 return {
                     "status": "error",
                     "error": f"Pylint failed with return code {process.returncode}",
@@ -255,9 +254,7 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
                         "Coverage XML generation failed with return code %s",
                         process.returncode,
                     )
-                    error_message = (
-                        f"Coverage XML generation failed with return code {process.returncode}"
-                    )
+                    error_message = f"Coverage XML generation failed with return code {process.returncode}"
                     return {
                         "status": "error",
                         "error": error_message,

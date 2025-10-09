@@ -258,9 +258,7 @@ class DataAccess:
             result = cursor.fetchone()
         return int(result[0]) if result else None
 
-    def create_commit(
-        self, repo_id: int, commit_hash: str, **metadata: Any
-    ) -> int:
+    def create_commit(self, repo_id: int, commit_hash: str, **metadata: Any) -> int:
         """Insert a commit row and return its identifier.
 
         Accepted keyword arguments: ``author``, ``message``, and ``timestamp``.
