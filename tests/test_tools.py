@@ -188,14 +188,18 @@ class TestCoverage(unittest.TestCase):
         mock_file1.get.side_effect = lambda key, default: (
             "file1.py"
             if key == "filename"
-            else "0.9" if key == "line-rate" else default
+            else "0.9"
+            if key == "line-rate"
+            else default
         )
 
         mock_file2 = MagicMock()
         mock_file2.get.side_effect = lambda key, default: (
             "file2.py"
             if key == "filename"
-            else "0.8" if key == "line-rate" else default
+            else "0.8"
+            if key == "line-rate"
+            else default
         )
 
         mock_root.findall.return_value = [mock_file1, mock_file2]
