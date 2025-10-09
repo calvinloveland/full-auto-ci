@@ -1,5 +1,7 @@
 """Tests for the CI service."""
 
+# pylint: disable=protected-access
+
 import json
 import os
 import sqlite3
@@ -205,10 +207,10 @@ class TestCIService(unittest.TestCase):
         )
         self.service.data.insert_result(
             commit_id,
-            "pylint",
-            "success",
-            json.dumps({"status": "success", "score": 9.5}),
-            0.5,
+            tool="pylint",
+            status="success",
+            output=json.dumps({"status": "success", "score": 9.5}),
+            duration=0.5,
         )
 
         runs = self.service.get_test_results(repo_id)

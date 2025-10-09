@@ -5,10 +5,9 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import tempfile
-import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -17,31 +16,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RepositoryConfig:
+    """Repository metadata required to interact with git."""
+
+    repo_id: int
+    name: str
+    url: str
+    branch: str = "main"
+    work_dir: Optional[str] = None
+
+
 class GitRepo:
     """Git repository handler."""
 
-    def __init__(
-        self,
-        repo_id: int,
-        name: str,
-        url: str,
-        branch: str = "main",
-        work_dir: Optional[str] = None,
-    ):
-        """Initialize a Git repository handler.
+    def __init__(self, config: RepositoryConfig):
+        """Initialize a Git repository handler from ``config``."""
 
-        Args:
-            repo_id: Repository ID
-            name: Repository name
-            url: Repository URL
-            branch: Branch to monitor
-            work_dir: Working directory for clones (defaults to temporary directory)
-        """
-        self.repo_id = repo_id
-        self.name = name
-        self.url = url
-        self.branch = branch
-        self.work_dir = work_dir or os.path.expanduser("~/.fullautoci/repos")
+        self.repo_id = config.repo_id
+        self.name = config.name
+        self.url = config.url
+        self.branch = config.branch
+        self.work_dir = config.work_dir or os.path.expanduser("~/.fullautoci/repos")
         self.repo_path = os.path.join(
             self.work_dir, f"{self.repo_id}_{self.name.replace(' ', '_')}"
         )
@@ -58,26 +54,28 @@ class GitRepo:
         try:
             # Remove existing clone if it exists
             if os.path.exists(self.repo_path):
-                logger.info(f"Removing existing repository at {self.repo_path}")
+                logger.info("Removing existing repository at %s", self.repo_path)
                 shutil.rmtree(self.repo_path)
 
             # Clone the repository
-            logger.info(f"Cloning repository {self.name} from {self.url}")
-            result = subprocess.run(
+            logger.info("Cloning repository %s from %s", self.name, self.url)
+            subprocess.run(
                 ["git", "clone", "-b", self.branch, self.url, self.repo_path],
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            logger.info(f"Cloned repository {self.name} to {self.repo_path}")
+            logger.info("Cloned repository %s to %s", self.name, self.repo_path)
             return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to clone repository {self.name}: {e}")
-            logger.error(f"Stdout: {e.stdout}")
-            logger.error(f"Stderr: {e.stderr}")
+        except subprocess.CalledProcessError as error:
+            logger.error(
+                "Failed to clone repository %s: %s", self.name, error
+            )
+            logger.error("Stdout: %s", error.stdout)
+            logger.error("Stderr: %s", error.stderr)
             return False
-        except Exception as e:
-            logger.error(f"Error cloning repository {self.name}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error cloning repository %s", self.name)
             return False
 
     def pull(self) -> bool:
@@ -90,28 +88,32 @@ class GitRepo:
             # Check if repository exists
             if not os.path.exists(self.repo_path):
                 logger.warning(
-                    f"Repository {self.name} not found at {self.repo_path}, cloning instead"
+                    "Repository %s not found at %s, cloning instead",
+                    self.name,
+                    self.repo_path,
                 )
                 return self.clone()
 
             # Pull the latest changes
-            logger.info(f"Pulling latest changes for repository {self.name}")
-            result = subprocess.run(
+            logger.info("Pulling latest changes for repository %s", self.name)
+            subprocess.run(
                 ["git", "pull", "origin", self.branch],
                 cwd=self.repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            logger.info(f"Pulled latest changes for repository {self.name}")
+            logger.info("Pulled latest changes for repository %s", self.name)
             return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to pull repository {self.name}: {e}")
-            logger.error(f"Stdout: {e.stdout}")
-            logger.error(f"Stderr: {e.stderr}")
+        except subprocess.CalledProcessError as error:
+            logger.error(
+                "Failed to pull repository %s: %s", self.name, error
+            )
+            logger.error("Stdout: %s", error.stdout)
+            logger.error("Stderr: %s", error.stderr)
             return False
-        except Exception as e:
-            logger.error(f"Error pulling repository {self.name}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error pulling repository %s", self.name)
             return False
 
     def get_latest_commit(self) -> Optional[Dict[str, Any]]:
@@ -123,11 +125,13 @@ class GitRepo:
         try:
             # Check if repository exists
             if not os.path.exists(self.repo_path):
-                logger.warning(f"Repository {self.name} not found at {self.repo_path}")
+                logger.warning(
+                    "Repository %s not found at %s", self.name, self.repo_path
+                )
                 return None
 
             # Get the latest commit
-            logger.info(f"Getting latest commit for repository {self.name}")
+            logger.info("Getting latest commit for repository %s", self.name)
             result = subprocess.run(
                 ["git", "log", "-1", "--format=%H%n%an%n%ae%n%at%n%s"],
                 cwd=self.repo_path,
@@ -138,7 +142,7 @@ class GitRepo:
             lines = result.stdout.strip().split("\n")
 
             if len(lines) < 5:
-                logger.error(f"Unexpected git log output format: {result.stdout}")
+                logger.error("Unexpected git log output format: %s", result.stdout)
                 return None
 
             commit_hash = lines[0]
@@ -158,13 +162,17 @@ class GitRepo:
             }
 
             return commit
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to get latest commit for repository {self.name}: {e}")
-            logger.error(f"Stdout: {e.stdout}")
-            logger.error(f"Stderr: {e.stderr}")
+        except subprocess.CalledProcessError as error:
+            logger.error(
+                "Failed to get latest commit for repository %s: %s",
+                self.name,
+                error,
+            )
+            logger.error("Stdout: %s", error.stdout)
+            logger.error("Stderr: %s", error.stderr)
             return None
-        except Exception as e:
-            logger.error(f"Error getting latest commit for repository {self.name}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error getting latest commit for repository %s", self.name)
             return None
 
     def get_commits_since(self, since_commit: str) -> List[Dict[str, Any]]:
@@ -179,12 +187,16 @@ class GitRepo:
         try:
             # Check if repository exists
             if not os.path.exists(self.repo_path):
-                logger.warning(f"Repository {self.name} not found at {self.repo_path}")
+                logger.warning(
+                    "Repository %s not found at %s", self.name, self.repo_path
+                )
                 return []
 
             # Get all commits since the given commit
             logger.info(
-                f"Getting commits since {since_commit} for repository {self.name}"
+                "Getting commits since %s for repository %s",
+                since_commit,
+                self.name,
             )
             result = subprocess.run(
                 [
@@ -202,7 +214,7 @@ class GitRepo:
             output = result.stdout.strip()
 
             if not output:
-                logger.info(f"No new commits found since {since_commit}")
+                logger.info("No new commits found since %s", since_commit)
                 return []
 
             # Parse the output
@@ -213,7 +225,7 @@ class GitRepo:
                 lines = block.strip().split("\n")
                 if len(lines) < 5:
                     logger.warning(
-                        f"Unexpected git log output format in block: {block}"
+                        "Unexpected git log output format in block: %s", block
                     )
                     continue
 
@@ -236,16 +248,21 @@ class GitRepo:
                 )
 
             return commits
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError as error:
             logger.error(
-                f"Failed to get commits since {since_commit} for repository {self.name}: {e}"
+                "Failed to get commits since %s for repository %s: %s",
+                since_commit,
+                self.name,
+                error,
             )
-            logger.error(f"Stdout: {e.stdout}")
-            logger.error(f"Stderr: {e.stderr}")
+            logger.error("Stdout: %s", error.stdout)
+            logger.error("Stderr: %s", error.stderr)
             return []
-        except Exception as e:
-            logger.error(
-                f"Error getting commits since {since_commit} for repository {self.name}: {e}"
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception(
+                "Error getting commits since %s for repository %s",
+                since_commit,
+                self.name,
             )
             return []
 
@@ -261,30 +278,41 @@ class GitRepo:
         try:
             # Check if repository exists
             if not os.path.exists(self.repo_path):
-                logger.warning(f"Repository {self.name} not found at {self.repo_path}")
+                logger.warning(
+                    "Repository %s not found at %s", self.name, self.repo_path
+                )
                 return False
 
             # Checkout the commit
-            logger.info(f"Checking out commit {commit_hash} for repository {self.name}")
-            result = subprocess.run(
+            logger.info(
+                "Checking out commit %s for repository %s", commit_hash, self.name
+            )
+            subprocess.run(
                 ["git", "checkout", commit_hash],
                 cwd=self.repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            logger.info(f"Checked out commit {commit_hash} for repository {self.name}")
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"Failed to checkout commit {commit_hash} for repository {self.name}: {e}"
+            logger.info(
+                "Checked out commit %s for repository %s", commit_hash, self.name
             )
-            logger.error(f"Stdout: {e.stdout}")
-            logger.error(f"Stderr: {e.stderr}")
-            return False
-        except Exception as e:
+            return True
+        except subprocess.CalledProcessError as error:
             logger.error(
-                f"Error checking out commit {commit_hash} for repository {self.name}: {e}"
+                "Failed to checkout commit %s for repository %s: %s",
+                commit_hash,
+                self.name,
+                error,
+            )
+            logger.error("Stdout: %s", error.stdout)
+            logger.error("Stderr: %s", error.stderr)
+            return False
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception(
+                "Error checking out commit %s for repository %s",
+                commit_hash,
+                self.name,
             )
             return False
 
@@ -317,7 +345,13 @@ class GitTracker:
         """
         try:
             # Create GitRepo instance
-            repo = GitRepo(repo_id, name, url, branch)
+            repo_config = RepositoryConfig(
+                repo_id=repo_id,
+                name=name,
+                url=url,
+                branch=branch,
+            )
+            repo = GitRepo(repo_config)
 
             # Try to clone the repository
             if not repo.clone():
@@ -332,8 +366,8 @@ class GitTracker:
                 self._store_commit(commit)
 
             return True
-        except Exception as e:
-            logger.error(f"Error adding repository {name}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error adding repository %s", name)
             return False
 
     def remove_repository(self, repo_id: int) -> bool:
@@ -348,7 +382,7 @@ class GitTracker:
         try:
             # Check if repository exists in tracker
             if repo_id not in self.repos:
-                logger.warning(f"Repository {repo_id} not found in tracker")
+                logger.warning("Repository %s not found in tracker", repo_id)
                 return False
 
             # Get the repository
@@ -362,8 +396,8 @@ class GitTracker:
             del self.repos[repo_id]
 
             return True
-        except Exception as e:
-            logger.error(f"Error removing repository {repo_id}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error removing repository %s", repo_id)
             return False
 
     def check_for_updates(self) -> Dict[int, List[Dict[str, Any]]]:
@@ -382,7 +416,7 @@ class GitTracker:
             try:
                 # Pull the latest changes
                 if not repo.pull():
-                    logger.error(f"Failed to pull repository {repo.name}")
+                    logger.error("Failed to pull repository %s", repo.name)
                     continue
 
                 # Get the latest commit we have stored
@@ -401,8 +435,10 @@ class GitTracker:
                         for commit in commits:
                             self._store_commit(commit)
                         new_commits[repo_id] = commits
-            except Exception as e:
-                logger.error(f"Error checking for updates in repository {repo_id}: {e}")
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception(
+                    "Error checking for updates in repository %s", repo_id
+                )
 
         return new_commits
 
@@ -442,11 +478,18 @@ class GitTracker:
                     continue
 
                 # Create GitRepo instance
-                self.repos[repo_id] = GitRepo(repo_id, name, url, branch)
+                self.repos[repo_id] = GitRepo(
+                    RepositoryConfig(
+                        repo_id=repo_id,
+                        name=name,
+                        url=url,
+                        branch=branch,
+                    )
+                )
 
-            logger.info(f"Loaded {len(self.repos)} repositories from database")
-        except Exception as e:
-            logger.error(f"Error loading repositories from database: {e}")
+            logger.info("Loaded %s repositories from database", len(self.repos))
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error loading repositories from database")
 
     def _get_latest_commit_hash(self, repo_id: int) -> Optional[str]:
         """Get the latest commit hash for a repository from the database.
@@ -464,7 +507,13 @@ class GitTracker:
 
             # Get the latest commit
             cursor.execute(
-                "SELECT commit_hash FROM commits WHERE repository_id = ? ORDER BY timestamp DESC LIMIT 1",
+                """
+                SELECT commit_hash
+                FROM commits
+                WHERE repository_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
                 (repo_id,),
             )
             result = cursor.fetchone()
@@ -473,9 +522,9 @@ class GitTracker:
             conn.close()
 
             return result[0] if result else None
-        except Exception as e:
-            logger.error(
-                f"Error getting latest commit hash for repository {repo_id}: {e}"
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception(
+                "Error getting latest commit hash for repository %s", repo_id
             )
             return None
 
@@ -515,6 +564,6 @@ class GitTracker:
             conn.close()
 
             return True
-        except Exception as e:
-            logger.error(f"Error storing commit {commit['hash']}: {e}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Error storing commit %s", commit["hash"])
             return False

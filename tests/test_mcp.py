@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from src import __version__ as PACKAGE_VERSION
 from src.mcp.server import MCPError, MCPServer
 
 
@@ -106,8 +107,34 @@ def test_handshake_announces_capabilities(dummy_service):
         server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "handshake"})
     )
     assert response["result"]["name"] == "full-auto-ci"
+    assert response["result"]["version"] == PACKAGE_VERSION
     capability_names = {cap["name"] for cap in response["result"]["capabilities"]}
     assert capability_names == {"listRepositories", "queueTestRun", "getLatestResults"}
+
+
+def test_initialize_negotiates_protocol_and_capabilities(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "clientInfo": {"name": "client", "version": "1.0"},
+                    "capabilities": {},
+                },
+            }
+        )
+    )
+
+    result = response["result"]
+    assert result["protocolVersion"] == "2025-06-18"
+    assert result["serverInfo"]["name"] == "full-auto-ci"
+    assert result["serverInfo"]["version"] == PACKAGE_VERSION
+    assert "capabilities" in result
+    assert "instructions" in result
 
 
 def test_list_repositories_returns_service_data(dummy_service):
@@ -189,6 +216,44 @@ def test_requires_token_when_configured(dummy_service):
         )
     )
     assert "repositories" in response["result"]
+
+
+def test_initialize_requires_token_when_configured(dummy_service):
+    server = MCPServer(dummy_service, auth_token="secret")
+    with pytest.raises(MCPError) as excinfo:
+        _run(
+            server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "clientInfo": {"name": "client", "version": "1.2"},
+                        "capabilities": {},
+                    },
+                }
+            )
+        )
+    assert excinfo.value.code == -32604
+
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "clientInfo": {"name": "client", "version": "1.2"},
+                    "capabilities": {
+                        "experimental": {"fullAutoCI": {"token": "secret"}}
+                    },
+                },
+            }
+        )
+    )
+    assert response["result"]["serverInfo"]["name"] == "full-auto-ci"
 
 
 def test_unknown_method_raises(dummy_service):

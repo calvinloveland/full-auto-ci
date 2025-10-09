@@ -42,32 +42,37 @@ def _ensure_secret_key(service: CIService) -> str:
 def _timeago(value: int | None) -> str:
     if value is None:
         return "—"
+
     try:
         dt = datetime.fromtimestamp(int(value))
     except (TypeError, ValueError):
         return "—"
 
-    delta = datetime.now() - dt
-    seconds = int(delta.total_seconds())
+    seconds = int((datetime.now() - dt).total_seconds())
     if seconds < 60:
-        return "just now"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    days = hours // 24
-    if days < 7:
-        return f"{days} day{'s' if days != 1 else ''} ago"
-    weeks = days // 7
-    if weeks < 5:
-        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-    months = days // 30
-    if months < 12:
-        return f"{months} month{'s' if months != 1 else ''} ago"
-    years = days // 365
-    return f"{years} year{'s' if years != 1 else ''} ago"
+        result = "just now"
+    else:
+        periods = [
+            ("minute", 60),
+            ("hour", 3600),
+            ("day", 86400),
+            ("week", 604800),
+            ("month", 2592000),
+            ("year", 31536000),
+        ]
+
+        result = "—"
+        for index, (name, duration) in enumerate(periods):
+            next_boundary = periods[index + 1][1] if index + 1 < len(periods) else None
+            if next_boundary is not None and seconds >= next_boundary:
+                continue
+
+            count = max(1, seconds // duration)
+            plural = "s" if count != 1 else ""
+            result = f"{count} {name}{plural} ago"
+            break
+
+    return result
 
 
 def _status_class(status: str | None) -> str:

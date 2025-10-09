@@ -33,7 +33,13 @@ def dashboard_app(monkeypatch):
             message="Initial commit",
             timestamp=timestamp,
         )
-        data.insert_result(commit_id, "pylint", "success", "{}", 1.2)
+        data.insert_result(
+            commit_id,
+            tool="pylint",
+            status="success",
+            output="{}",
+            duration=1.2,
+        )
 
         app = create_app(db_path=db_path)
         app.config.update(TESTING=True)

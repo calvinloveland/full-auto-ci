@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """Launch the dashboard Flask app using config defaults."""
+
     app = create_app()
     service = app.config["CI_SERVICE"]
     dashboard_config: dict[str, Any] = service.config.get("dashboard") or {}

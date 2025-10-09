@@ -434,13 +434,47 @@ class TestCLI(unittest.TestCase):
 
         mock_async_run.side_effect = fake_run
 
-        exit_code = self.cli.run(
-            ["mcp", "serve", "--host", "0.0.0.0", "--port", "9001", "--token", "tok"]
-        )
+        with patch.object(self.cli, "_probe_mcp_server", return_value=None):
+            exit_code = self.cli.run(
+                [
+                    "mcp",
+                    "serve",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "9001",
+                    "--token",
+                    "tok",
+                ]
+            )
 
         self.assertEqual(exit_code, 0)
         mock_server_cls.assert_called_once_with(self.cli.service, auth_token="tok")
         mock_async_run.assert_called_once()
+
+    @patch("builtins.print")
+    def test_mcp_serve_detects_existing_server(self, mock_print):
+        with patch.object(self.cli, "_probe_mcp_server", return_value="available"):
+            exit_code = self.cli.run(
+                ["mcp", "serve", "--host", "127.0.0.1", "--port", "8765", "--no-token"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_called_with(
+            "MCP server already running on 127.0.0.1:8765 (token=disabled)"
+        )
+
+    @patch("builtins.print")
+    def test_mcp_serve_rejects_when_token_mismatch(self, mock_print):
+        with patch.object(self.cli, "_probe_mcp_server", return_value="unauthorized"):
+            exit_code = self.cli.run(
+                ["mcp", "serve", "--host", "127.0.0.1", "--port", "8765", "--token", "tok"]
+            )
+
+        self.assertEqual(exit_code, 1)
+        mock_print.assert_called_with(
+            "Error: MCP server is already running but rejected the provided token."
+        )
 
 
 if __name__ == "__main__":

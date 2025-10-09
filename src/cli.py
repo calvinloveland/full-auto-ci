@@ -2,11 +2,13 @@
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 import webbrowser
@@ -87,19 +89,30 @@ class CLI:
         Returns:
             Parsed arguments
         """
+        parser = self._build_parser()
+        return parser.parse_args(args)
+
+    def _build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description="Full Auto CI - Automated Continuous Integration"
         )
         subparsers = parser.add_subparsers(dest="command", help="Command to run")
+        self._register_service_commands(subparsers)
+        self._register_repo_commands(subparsers)
+        self._register_test_commands(subparsers)
+        self._register_config_commands(subparsers)
+        self._register_user_commands(subparsers)
+        self._register_mcp_commands(subparsers)
+        return parser
 
-        # Service commands
+    def _register_service_commands(self, subparsers) -> None:
         service_parser = subparsers.add_parser("service", help="Service management")
         service_subparsers = service_parser.add_subparsers(dest="service_command")
         service_subparsers.add_parser("start", help="Start the CI service")
         service_subparsers.add_parser("stop", help="Stop the CI service")
         service_subparsers.add_parser("status", help="Check service status")
 
-        # Repository commands
+    def _register_repo_commands(self, subparsers) -> None:
         repo_parser = subparsers.add_parser("repo", help="Repository management")
         repo_subparsers = repo_parser.add_subparsers(dest="repo_command")
         repo_subparsers.add_parser("list", help="List repositories")
@@ -112,7 +125,7 @@ class CLI:
         remove_parser = repo_subparsers.add_parser("remove", help="Remove a repository")
         remove_parser.add_argument("repo_id", type=int, help="Repository ID")
 
-        # Test commands
+    def _register_test_commands(self, subparsers) -> None:
         test_parser = subparsers.add_parser("test", help="Test management")
         test_subparsers = test_parser.add_subparsers(dest="test_command")
 
@@ -124,7 +137,7 @@ class CLI:
         results_parser.add_argument("repo_id", type=int, help="Repository ID")
         results_parser.add_argument("--commit", help="Commit hash (optional)")
 
-        # Configuration commands
+    def _register_config_commands(self, subparsers) -> None:
         config_parser = subparsers.add_parser("config", help="Configuration management")
         config_subparsers = config_parser.add_subparsers(dest="config_command")
 
@@ -150,7 +163,7 @@ class CLI:
 
         config_subparsers.add_parser("path", help="Show configuration file path")
 
-        # User management commands
+    def _register_user_commands(self, subparsers) -> None:
         user_parser = subparsers.add_parser("user", help="User management")
         user_subparsers = user_parser.add_subparsers(dest="user_command")
 
@@ -165,7 +178,7 @@ class CLI:
         user_remove = user_subparsers.add_parser("remove", help="Remove a user")
         user_remove.add_argument("username", help="Username to remove")
 
-        # MCP commands
+    def _register_mcp_commands(self, subparsers) -> None:
         mcp_parser = subparsers.add_parser("mcp", help="Model Context Protocol server")
         mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
 
@@ -183,8 +196,6 @@ class CLI:
             action="store_true",
             help="Disable token requirement even if FULL_AUTO_CI_MCP_TOKEN is set",
         )
-
-        return parser.parse_args(args)
 
     def run(self, args: Optional[List[str]] = None) -> int:
         """Run the CLI with the given arguments.
@@ -207,21 +218,21 @@ class CLI:
             print("Error: No command specified")
             return 1
 
-        if parsed_args.command == "service":
-            return self._handle_service_command(parsed_args)
-        elif parsed_args.command == "repo":
-            return self._handle_repo_command(parsed_args)
-        elif parsed_args.command == "test":
-            return self._handle_test_command(parsed_args)
-        elif parsed_args.command == "config":
-            return self._handle_config_command(parsed_args)
-        elif parsed_args.command == "user":
-            return self._handle_user_command(parsed_args)
-        elif parsed_args.command == "mcp":
-            return self._handle_mcp_command(parsed_args)
-        else:
+        handler_map = {
+            "service": self._handle_service_command,
+            "repo": self._handle_repo_command,
+            "test": self._handle_test_command,
+            "config": self._handle_config_command,
+            "user": self._handle_user_command,
+            "mcp": self._handle_mcp_command,
+        }
+
+        handler = handler_map.get(parsed_args.command)
+        if handler is None:
             print(f"Error: Unknown command {parsed_args.command}")
             return 1
+
+        return handler(parsed_args)
 
     def _handle_service_command(self, args: argparse.Namespace) -> int:
         """Handle service commands.
@@ -232,116 +243,193 @@ class CLI:
         Returns:
             Exit code
         """
-        if args.service_command == "start":
-            existing_pid = self._read_pid()
-            if existing_pid and self._is_pid_running(existing_pid):
-                print(f"Service already running (PID {existing_pid})")
-                return 0
+        handler_map = {
+            "start": self._service_start,
+            "stop": self._service_stop,
+            "status": self._service_status,
+        }
 
-            dashboard_cfg = self.service.config.get("dashboard") or {}
-            host = str(dashboard_cfg.get("host", "127.0.0.1"))
-            port = dashboard_cfg.get("port", 8000)
-            visible_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-            dashboard_url = f"http://{visible_host}:{port}"
-
-            process = multiprocessing.Process(
-                target=_run_service_process,
-                args=(self.service.config.config_path, self.service.db_path),
-                daemon=False,
-            )
-            process.start()
-            time.sleep(0.5)
-
-            if not process.is_alive():
-                print("Error: Service failed to start. Check logs for details.")
-                return 1
-
-            self._write_pid_file(process.pid)
-            print(f"Service started in background (PID {process.pid}).")
-            print(f"Dashboard available at {dashboard_url}")
-            self._maybe_start_dashboard(dashboard_cfg)
-            self._maybe_open_dashboard(dashboard_url, dashboard_cfg)
-            return 0
-        elif args.service_command == "stop":
-            pid = self._read_pid()
-            if not pid:
-                print("Service is not running")
-                self._remove_pid_file()
-                self._maybe_cleanup_dashboard()
-                return 0
-
-            if not self._is_pid_running(pid):
-                print("Service is not running")
-                self._remove_pid_file()
-                self._maybe_cleanup_dashboard()
-                return 0
-
-            print(f"Stopping service (PID {pid})...")
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError as error:
-                logger.error("Failed to signal service process %s: %s", pid, error)
-                return 1
-
-            waited = 0.0
-            while self._is_pid_running(pid) and waited < 10.0:
-                time.sleep(0.2)
-                waited += 0.2
-
-            if self._is_pid_running(pid):
-                print(f"Service did not terminate in time (PID {pid})")
-                return 1
-
-            self._remove_pid_file()
-            self._stop_dashboard_process()
-            print("Service stopped")
-            return 0
-        elif args.service_command == "status":
-            pid = self._read_pid()
-            if pid and self._is_pid_running(pid):
-                print(f"Service is running (PID {pid})")
-            else:
-                print("Service is not running")
-                self._remove_pid_file()
-            dashboard_pid = self._read_dashboard_pid()
-            if dashboard_pid and self._is_pid_running(dashboard_pid):
-                print(f"Dashboard is running (PID {dashboard_pid})")
-            elif dashboard_pid:
-                self._remove_dashboard_pid()
-            return 0
-        else:
+        handler = handler_map.get(args.service_command)
+        if handler is None:
             print(f"Error: Unknown service command {args.service_command}")
             return 1
 
-    def _handle_mcp_command(self, args: argparse.Namespace) -> int:
-        if args.mcp_command == "serve":
-            token = None
-            if not args.no_token:
-                token = args.token or os.getenv("FULL_AUTO_CI_MCP_TOKEN")
+        return handler(args)
 
-            server = MCPServer(self.service, auth_token=token)
-            host = args.host
-            port = args.port
+    def _service_start(self, _args: argparse.Namespace) -> int:
+        """Start the CI service in a background process."""
 
-            print(
-                f"Starting MCP server on {host}:{port} (token={'enabled' if token else 'disabled'})"
-            )
-
-            async def runner() -> None:
-                try:
-                    await server.serve_tcp(host=host, port=port)
-                except asyncio.CancelledError:  # pragma: no cover
-                    pass
-
-            try:
-                asyncio.run(runner())
-            except KeyboardInterrupt:
-                print("MCP server stopped")
-                return 0
+        existing_pid = self._read_pid()
+        if existing_pid and self._is_pid_running(existing_pid):
+            print(f"Service already running (PID {existing_pid})")
             return 0
 
-        print(f"Error: Unknown MCP command {args.mcp_command}")
-        return 1
+        dashboard_cfg = self.service.config.get("dashboard") or {}
+        host = str(dashboard_cfg.get("host", "127.0.0.1"))
+        port = dashboard_cfg.get("port", 8000)
+        visible_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        dashboard_url = f"http://{visible_host}:{port}"
+
+        process = multiprocessing.Process(
+            target=_run_service_process,
+            args=(self.service.config.config_path, self.service.db_path),
+            daemon=False,
+        )
+        process.start()
+        time.sleep(0.5)
+
+        if not process.is_alive():
+            print("Error: Service failed to start. Check logs for details.")
+            return 1
+
+        self._write_pid_file(process.pid)
+        print(f"Service started in background (PID {process.pid}).")
+        print(f"Dashboard available at {dashboard_url}")
+        self._maybe_start_dashboard(dashboard_cfg)
+        self._maybe_open_dashboard(dashboard_url, dashboard_cfg)
+        return 0
+
+    def _service_stop(self, _args: argparse.Namespace) -> int:
+        """Stop the CI service if it is running."""
+
+        pid = self._read_pid()
+        if not pid or not self._is_pid_running(pid):
+            print("Service is not running")
+            self._remove_pid_file()
+            self._maybe_cleanup_dashboard()
+            return 0
+
+        print(f"Stopping service (PID {pid})...")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as error:
+            logger.error("Failed to signal service process %s: %s", pid, error)
+            return 1
+
+        waited = 0.0
+        while self._is_pid_running(pid) and waited < 10.0:
+            time.sleep(0.2)
+            waited += 0.2
+
+        if self._is_pid_running(pid):
+            print(f"Service did not terminate in time (PID {pid})")
+            return 1
+
+        self._remove_pid_file()
+        self._stop_dashboard_process()
+        print("Service stopped")
+        return 0
+
+    def _service_status(self, _args: argparse.Namespace) -> int:
+        """Report service and dashboard process status."""
+
+        pid = self._read_pid()
+        if pid and self._is_pid_running(pid):
+            print(f"Service is running (PID {pid})")
+        else:
+            print("Service is not running")
+            self._remove_pid_file()
+
+        dashboard_pid = self._read_dashboard_pid()
+        if dashboard_pid and self._is_pid_running(dashboard_pid):
+            print(f"Dashboard is running (PID {dashboard_pid})")
+        elif dashboard_pid:
+            self._remove_dashboard_pid()
+
+        return 0
+
+    def _handle_mcp_command(self, args: argparse.Namespace) -> int:
+        handler_map = {"serve": self._mcp_serve}
+        handler = handler_map.get(args.mcp_command)
+        if handler is None:
+            print(f"Error: Unknown MCP command {args.mcp_command}")
+            return 1
+        return handler(args)
+
+    def _mcp_serve(self, args: argparse.Namespace) -> int:
+        token = None
+        if not args.no_token:
+            token = args.token or os.getenv("FULL_AUTO_CI_MCP_TOKEN")
+
+        server = MCPServer(self.service, auth_token=token)
+        host = args.host
+        port = args.port
+        token_state = "enabled" if token else "disabled"
+
+        probe_state = self._probe_mcp_server(host, port, token)
+        if probe_state == "available":
+            print(f"MCP server already running on {host}:{port} (token={token_state})")
+            return 0
+        if probe_state == "unauthorized":
+            print(
+                "Error: MCP server is already running but rejected the provided token."
+            )
+            return 1
+
+        print(f"Starting MCP server on {host}:{port} (token={token_state})")
+
+        async def runner() -> None:
+            try:
+                await server.serve_tcp(host=host, port=port)
+            except OSError as exc:  # pragma: no cover - depends on environment
+                if exc.errno == errno.EADDRINUSE:
+                    print(
+                        f"Error: MCP server port {host}:{port} is already in use."
+                    )
+                    return
+                raise
+            except asyncio.CancelledError:  # pragma: no cover
+                pass
+
+        try:
+            asyncio.run(runner())
+        except KeyboardInterrupt:
+            print("MCP server stopped")
+        return 0
+
+    def _probe_mcp_server(
+        self, host: str, port: int, token: Optional[str]
+    ) -> Optional[str]:
+        """Check whether an MCP server is already listening on the target port."""
+
+        try:
+            with socket.create_connection((host, port), timeout=1.0) as sock:
+                params: Dict[str, Any] = {}
+                if token:
+                    params["token"] = token
+                message = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "handshake",
+                    "params": params,
+                }
+                sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
+                sock.settimeout(1.0)
+                buffer = b""
+                while not buffer.endswith(b"\n"):
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+        except (OSError, ValueError):
+            return None
+
+        if not buffer:
+            return None
+
+        try:
+            response = json.loads(buffer.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+        if isinstance(response, dict) and "result" in response:
+            return "available"
+
+        error = response.get("error") if isinstance(response, dict) else None
+        if isinstance(error, dict) and error.get("code") == -32604:
+            return "unauthorized"
+
+        return None
 
     def _handle_repo_command(self, args: argparse.Namespace) -> int:
         """Handle repository commands.
@@ -352,33 +440,50 @@ class CLI:
         Returns:
             Exit code
         """
-        if args.repo_command == "list":
-            repos = self.service.list_repositories()
-            if not repos:
-                print("No repositories configured")
-            else:
-                print("ID | Name | URL | Branch")
-                print("-" * 50)
-                for repo in repos:
-                    print(
-                        f"{repo['id']} | {repo['name']} | {repo['url']} | {repo['branch']}"
-                    )
-            return 0
-        elif args.repo_command == "add":
-            repo_id = self.service.add_repository(args.name, args.url, args.branch)
-            print(f"Repository added with ID: {repo_id}")
-            return 0
-        elif args.repo_command == "remove":
-            success = self.service.remove_repository(args.repo_id)
-            if success:
-                print(f"Repository with ID {args.repo_id} removed")
-                return 0
-            else:
-                print(f"Error: Repository with ID {args.repo_id} not found")
-                return 1
-        else:
+        handler_map = {
+            "list": self._repo_list,
+            "add": self._repo_add,
+            "remove": self._repo_remove,
+        }
+
+        handler = handler_map.get(args.repo_command)
+        if handler is None:
             print(f"Error: Unknown repo command {args.repo_command}")
             return 1
+
+        return handler(args)
+
+    def _repo_list(self, _args: argparse.Namespace) -> int:
+        """Print the repository catalog."""
+
+        repos = self.service.list_repositories()
+        if not repos:
+            print("No repositories configured")
+            return 0
+
+        print("ID | Name | URL | Branch")
+        print("-" * 50)
+        for repo in repos:
+            print(f"{repo['id']} | {repo['name']} | {repo['url']} | {repo['branch']}")
+        return 0
+
+    def _repo_add(self, args: argparse.Namespace) -> int:
+        """Create a new repository entry."""
+
+        repo_id = self.service.add_repository(args.name, args.url, args.branch)
+        print(f"Repository added with ID: {repo_id}")
+        return 0
+
+    def _repo_remove(self, args: argparse.Namespace) -> int:
+        """Remove a repository by identifier."""
+
+        success = self.service.remove_repository(args.repo_id)
+        if success:
+            print(f"Repository with ID {args.repo_id} removed")
+            return 0
+
+        print(f"Error: Repository with ID {args.repo_id} not found")
+        return 1
 
     def _handle_test_command(self, args: argparse.Namespace) -> int:
         """Handle test commands.
@@ -389,159 +494,177 @@ class CLI:
         Returns:
             Exit code
         """
-        if args.test_command == "run":
-            results = self.service.run_tests(args.repo_id, args.commit)
-            print("Test results:")
-            print(f"Overall status: {results['status']}")
-            for warning in results.get("warnings", []):
-                print(f"Warning: {warning}")
-            for tool, result in results["tools"].items():
-                print(f"- {tool}: {result['status']}")
-            return 0
-        elif args.test_command == "results":
-            runs = self.service.get_test_results(
-                args.repo_id, commit_hash=getattr(args, "commit", None), limit=10
-            )
-
-            if not runs:
-                if args.commit:
-                    print(
-                        f"No test runs found for repository {args.repo_id} and commit {args.commit}."
-                    )
-                else:
-                    print(f"No test runs found for repository {args.repo_id}.")
-                return 0
-
-            print(f"Test runs for repository {args.repo_id}")
-            if args.commit:
-                print(f"Filtered by commit: {args.commit}")
-
-            for run in runs:
-                print(
-                    f"Run {run['id']} | Commit: {run['commit_hash']} | Status: {run['status']}"
-                )
-                created = run.get("created_at", "-")
-                started = run.get("started_at") or "-"
-                completed = run.get("completed_at") or "-"
-                print(
-                    f"  Created: {created} | Started: {started} | Completed: {completed}"
-                )
-
-                commit = run.get("commit") or {}
-                message = commit.get("message")
-                if message:
-                    print(f"  Message: {message}")
-
-                if run.get("error"):
-                    print(f"  Error: {run['error']}")
-
-                results = run.get("results") or []
-                if not results:
-                    print("  (no tool results persisted)")
-                    continue
-
-                for result in results:
-                    tool = result.get("tool", "unknown")
-                    status = result.get("status", "unknown")
-                    summary = self._summarize_tool_output(result.get("output"), status)
-                    line = f"  - {tool}: {status}"
-                    if summary:
-                        line += f" ({summary})"
-                    print(line)
-
-            return 0
-        else:
+        handler_map = {"run": self._test_run, "results": self._test_results}
+        handler = handler_map.get(args.test_command)
+        if handler is None:
             print(f"Error: Unknown test command {args.test_command}")
             return 1
+        return handler(args)
+
+    def _test_run(self, args: argparse.Namespace) -> int:
+        results = self.service.run_tests(args.repo_id, args.commit)
+        print("Test results:")
+        print(f"Overall status: {results['status']}")
+        for warning in results.get("warnings", []):
+            print(f"Warning: {warning}")
+        for tool, result in results["tools"].items():
+            print(f"- {tool}: {result['status']}")
+        return 0
+
+    def _test_results(self, args: argparse.Namespace) -> int:
+        runs = self.service.get_test_results(
+            args.repo_id, commit_hash=getattr(args, "commit", None), limit=10
+        )
+
+        if not runs:
+            if args.commit:
+                print(
+                    f"No test runs found for repository {args.repo_id} and commit {args.commit}."
+                )
+            else:
+                print(f"No test runs found for repository {args.repo_id}.")
+            return 0
+
+        print(f"Test runs for repository {args.repo_id}")
+        if args.commit:
+            print(f"Filtered by commit: {args.commit}")
+
+        for run in runs:
+            print(
+                f"Run {run['id']} | Commit: {run['commit_hash']} | Status: {run['status']}"
+            )
+            created = run.get("created_at", "-")
+            started = run.get("started_at") or "-"
+            completed = run.get("completed_at") or "-"
+            print(f"  Created: {created} | Started: {started} | Completed: {completed}")
+
+            commit = run.get("commit") or {}
+            message = commit.get("message")
+            if message:
+                print(f"  Message: {message}")
+
+            if run.get("error"):
+                print(f"  Error: {run['error']}")
+
+            results = run.get("results") or []
+            if not results:
+                print("  (no tool results persisted)")
+                continue
+
+            for result in results:
+                tool = result.get("tool", "unknown")
+                status = result.get("status", "unknown")
+                summary = self._summarize_tool_output(result.get("output"), status)
+                line = f"  - {tool}: {status}"
+                if summary:
+                    line += f" ({summary})"
+                print(line)
+
+        return 0
 
     def _handle_config_command(self, args: argparse.Namespace) -> int:
         """Handle configuration commands."""
         command = getattr(args, "config_command", None)
-        config = self.service.config
-
-        if command == "show":
-            section = getattr(args, "section", None)
-            key = getattr(args, "key", None)
-            data: Any
-
-            if section is None:
-                data = config.config
-            else:
-                section_data = config.get(section)
-                if section_data is None:
-                    print(f"Error: Configuration section '{section}' not found")
-                    return 1
-                if key is None:
-                    data = section_data
-                else:
-                    value = config.get(section, key)
-                    if value is None:
-                        print(f"Error: Key '{key}' not found in section '{section}'")
-                        return 1
-                    data = value
-
-            self._print_config_data(data, args.json)
-            return 0
-
-        if command == "set":
-            section = args.section
-            key = args.key
-            value = self._parse_config_value(args.value)
-            config.set(section, key, value)
-            if config.save():
-                print(f"Updated {section}.{key} = {value}")
-                return 0
-            print("Error: Failed to save configuration")
+        handler_map = {
+            "show": self._config_show,
+            "set": self._config_set,
+            "path": self._config_path,
+        }
+        handler = handler_map.get(command)
+        if handler is None:
+            print(f"Error: Unknown config command {command}")
             return 1
+        return handler(args)
 
-        if command == "path":
-            print(config.config_path)
+    def _config_show(self, args: argparse.Namespace) -> int:
+        config = self.service.config
+        section = getattr(args, "section", None)
+        key = getattr(args, "key", None)
+        data: Any
+
+        if section is None:
+            data = config.config
+        else:
+            section_data = config.get(section)
+            if section_data is None:
+                print(f"Error: Configuration section '{section}' not found")
+                return 1
+            if key is None:
+                data = section_data
+            else:
+                value = config.get(section, key)
+                if value is None:
+                    print(f"Error: Key '{key}' not found in section '{section}'")
+                    return 1
+                data = value
+
+        self._print_config_data(data, args.json)
+        return 0
+
+    def _config_set(self, args: argparse.Namespace) -> int:
+        config = self.service.config
+        section = args.section
+        key = args.key
+        value = self._parse_config_value(args.value)
+        config.set(section, key, value)
+        if config.save():
+            print(f"Updated {section}.{key} = {value}")
             return 0
-
-        print(f"Error: Unknown config command {command}")
+        print("Error: Failed to save configuration")
         return 1
+
+    def _config_path(self, _args: argparse.Namespace) -> int:
+        print(self.service.config.config_path)
+        return 0
 
     def _handle_user_command(self, args: argparse.Namespace) -> int:
         """Handle user management commands."""
         command = getattr(args, "user_command", None)
-
-        if command == "list":
-            users = self.service.list_users()
-            if not users:
-                print("No users found")
-                return 0
-            print("ID | Username | Role | Created")
-            print("-" * 60)
-            for user in users:
-                created = user.get("created_at") or ""
-                print(
-                    f"{user['id']} | {user['username']} | {user.get('role', 'user')} | {created}"
-                )
-            return 0
-
-        if command == "add":
-            try:
-                user_id = self.service.create_user(
-                    args.username,
-                    args.password,
-                    role=getattr(args, "role", "user"),
-                    api_key=getattr(args, "api_key", None),
-                )
-            except ValueError as exc:
-                print(f"Error: {exc}")
-                return 1
-            print(f"User '{args.username}' created with id {user_id}")
-            return 0
-
-        if command == "remove":
-            success = self.service.remove_user(args.username)
-            if success:
-                print(f"User '{args.username}' removed")
-                return 0
-            print(f"Error: User '{args.username}' not found")
+        handler_map = {
+            "list": self._user_list,
+            "add": self._user_add,
+            "remove": self._user_remove,
+        }
+        handler = handler_map.get(command)
+        if handler is None:
+            print(f"Error: Unknown user command {command}")
             return 1
+        return handler(args)
 
-        print(f"Error: Unknown user command {command}")
+    def _user_list(self, _args: argparse.Namespace) -> int:
+        users = self.service.list_users()
+        if not users:
+            print("No users found")
+            return 0
+        print("ID | Username | Role | Created")
+        print("-" * 60)
+        for user in users:
+            created = user.get("created_at") or ""
+            print(
+                f"{user['id']} | {user['username']} | {user.get('role', 'user')} | {created}"
+            )
+        return 0
+
+    def _user_add(self, args: argparse.Namespace) -> int:
+        try:
+            user_id = self.service.create_user(
+                args.username,
+                args.password,
+                role=getattr(args, "role", "user"),
+                api_key=getattr(args, "api_key", None),
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+        print(f"User '{args.username}' created with id {user_id}")
+        return 0
+
+    def _user_remove(self, args: argparse.Namespace) -> int:
+        success = self.service.remove_user(args.username)
+        if success:
+            print(f"User '{args.username}' removed")
+            return 0
+        print(f"Error: User '{args.username}' not found")
         return 1
 
     @staticmethod
@@ -559,19 +682,27 @@ class CLI:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            lowered = raw.lower()
-            if lowered == "true":
-                return True
-            if lowered == "false":
-                return False
-            if lowered == "null":
-                return None
-            try:
-                if "." in raw:
-                    return float(raw)
-                return int(raw)
-            except ValueError:
-                return raw
+            pass
+
+        lowered = raw.lower()
+        literal_map = {"true": True, "false": False, "null": None}
+        if lowered in literal_map:
+            return literal_map[lowered]
+
+        numeric_value = CLI._parse_numeric_literal(raw)
+        if numeric_value is not None:
+            return numeric_value
+
+        return raw
+
+    @staticmethod
+    def _parse_numeric_literal(raw: str) -> Optional[float | int]:
+        try:
+            if "." in raw:
+                return float(raw)
+            return int(raw)
+        except ValueError:
+            return None
 
     @staticmethod
     def _summarize_tool_output(
@@ -705,7 +836,8 @@ class CLI:
         if existing_pid and self._is_pid_running(existing_pid):
             print(f"Dashboard already running (PID {existing_pid}).")
             return existing_pid
-        elif existing_pid:
+
+        if existing_pid:
             self._remove_dashboard_pid()
 
         process = multiprocessing.Process(

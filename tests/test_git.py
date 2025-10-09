@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 import shutil
 import sqlite3
 
-from src.git import GitRepo, GitTracker
+from src.git import GitRepo, GitTracker, RepositoryConfig
 
 
 class TestGitRepo(unittest.TestCase):
@@ -17,7 +17,12 @@ class TestGitRepo(unittest.TestCase):
         # Create temporary directory
         self.temp_dir = tempfile.mkdtemp()
         self.repo = GitRepo(
-            1, "test", "https://github.com/test/test.git", work_dir=self.temp_dir
+            RepositoryConfig(
+                repo_id=1,
+                name="test",
+                url="https://github.com/test/test.git",
+                work_dir=self.temp_dir,
+            )
         )
 
     def tearDown(self):
@@ -47,7 +52,7 @@ class TestGitRepo(unittest.TestCase):
         # Verify the result
         self.assertTrue(success)
         mock_run.assert_called_once()
-        args, kwargs = mock_run.call_args
+        args, _ = mock_run.call_args
         self.assertEqual(args[0][0], "git")
         self.assertEqual(args[0][1], "clone")
 
@@ -81,7 +86,7 @@ class TestGitRepo(unittest.TestCase):
         # Verify the result
         self.assertTrue(success)
         mock_run.assert_called_once()
-        args, kwargs = mock_run.call_args
+        args, _ = mock_run.call_args
         self.assertEqual(args[0][0], "git")
         self.assertEqual(args[0][1], "pull")
 
@@ -216,7 +221,7 @@ class TestGitTracker(unittest.TestCase):
     @patch("src.git.GitRepo")
     @patch("os.path.exists")
     @patch("shutil.rmtree")
-    def test_remove_repository(self, mock_rmtree, mock_exists, mock_git_repo):
+    def test_remove_repository(self, mock_rmtree, mock_exists, _mock_git_repo):
         """Test removing a repository."""
         # Setup
         mock_exists.return_value = True

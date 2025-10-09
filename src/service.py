@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from dataclasses import dataclass, field
+
 from .config import Config
 from .db import DataAccess
 from .git import GitTracker
@@ -21,6 +23,25 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ServiceRuntime:
+    """Mutable runtime state for :class:`CIService`."""
+
+    running: bool = False
+    task_queue: "queue.Queue[Dict[str, Any]]" = field(default_factory=queue.Queue)
+    workers: List[threading.Thread] = field(default_factory=list)
+    monitor_thread: Optional[threading.Thread] = None
+
+
+@dataclass
+class ServiceComponents:
+    """Container for service dependencies."""
+
+    git_tracker: GitTracker
+    tool_runner: ToolRunner
+    data: DataAccess
 
 
 class CIService:
@@ -41,17 +62,120 @@ class CIService:
             or self.config.get("database", "path")
             or os.path.expanduser("~/.fullautoci/database.sqlite")
         )
-        self.running = False
-        self.repositories = {}
-        self.git_tracker = GitTracker(db_path=self.db_path)
-        self.tool_runner = ToolRunner([Pylint(), Coverage()])
-        self.task_queue = queue.Queue()
-        self.workers = []
-        self.monitor_thread: Optional[threading.Thread] = None
-        self.data = DataAccess(self.db_path)
+        self._runtime = ServiceRuntime()
+        self._component_overrides: Dict[str, Any] = {}
+        self._components = ServiceComponents(
+            git_tracker=GitTracker(db_path=self.db_path),
+            tool_runner=ToolRunner([Pylint(), Coverage()]),
+            data=DataAccess(self.db_path),
+        )
         self.data.initialize_schema()
         self._bootstrap_dogfood_repository()
         logger.info("CI Service initialized")
+
+    @property
+    def running(self) -> bool:
+        """Return whether the service has been started."""
+
+        return self._runtime.running
+
+    @running.setter
+    def running(self, value: bool) -> None:
+        """Update the running flag for the service."""
+
+        self._runtime.running = value
+
+    @property
+    def task_queue(self) -> "queue.Queue[Dict[str, Any]]":
+        """Expose the background task queue."""
+
+        return self._runtime.task_queue
+
+    @property
+    def workers(self) -> List[threading.Thread]:
+        """Return worker threads spawned by the service."""
+
+        return self._runtime.workers
+
+    @property
+    def monitor_thread(self) -> Optional[threading.Thread]:
+        """Return the monitor thread if it has been started."""
+
+        return self._runtime.monitor_thread
+
+    @monitor_thread.setter
+    def monitor_thread(self, value: Optional[threading.Thread]) -> None:
+        """Update the active monitor thread reference."""
+
+        self._runtime.monitor_thread = value
+
+    def _set_component(self, name: str, value: Any) -> None:
+        """Assign a component while keeping track of the original value."""
+
+        if name not in self._component_overrides:
+            self._component_overrides[name] = getattr(self._components, name)
+        setattr(self._components, name, value)
+
+    def _reset_component(self, name: str) -> None:
+        """Restore a previously overridden component."""
+
+        original = self._component_overrides.pop(name, None)
+        if original is not None:
+            setattr(self._components, name, original)
+
+    @property
+    def tool_runner(self) -> ToolRunner:
+        """Access the tool runner component."""
+
+        return self._components.tool_runner
+
+    @tool_runner.setter
+    def tool_runner(self, value: ToolRunner) -> None:
+        """Override the tool runner component."""
+
+        self._set_component("tool_runner", value)
+
+    @tool_runner.deleter
+    def tool_runner(self) -> None:
+        """Reset the tool runner override."""
+
+        self._reset_component("tool_runner")
+
+    @property
+    def data(self) -> DataAccess:
+        """Access the database layer component."""
+
+        return self._components.data
+
+    @data.setter
+    def data(self, value: DataAccess) -> None:
+        """Override the data access component."""
+
+        self._set_component("data", value)
+
+    @data.deleter
+    def data(self) -> None:
+        """Reset the data component override."""
+
+        self._reset_component("data")
+
+    @property
+    def git_tracker(self) -> GitTracker:
+        """Access the git tracker component."""
+
+        return self._components.git_tracker
+
+    @git_tracker.setter
+    def git_tracker(self, value: GitTracker) -> None:
+        """Override the git tracker component."""
+
+        self._set_component("git_tracker", value)
+
+    @git_tracker.deleter
+    def git_tracker(self) -> None:
+        """Reset the git tracker component override."""
+
+        self._reset_component("git_tracker")
 
     def _create_test_run(
         self, repo_id: int, commit_hash: str, status: str = "pending"
@@ -351,12 +475,16 @@ class CIService:
         self.running = False
 
         # Join monitor thread
-        if hasattr(self, "monitor_thread"):
-            self.monitor_thread.join(timeout=5.0)
+        monitor = self.monitor_thread
+        if monitor:
+            monitor.join(timeout=5.0)
+            self.monitor_thread = None
 
         # Join worker threads
         for worker in self.workers:
             worker.join(timeout=1.0)
+
+        self.workers.clear()
 
         logger.info("CI Service stopped")
 
@@ -466,7 +594,13 @@ class CIService:
                 status = tool_result.get("status", "unknown")
                 output = json.dumps(tool_result)
                 duration = float(tool_result.get("duration", 0.0) or 0.0)
-                self.data.insert_result(commit_id, tool_name, status, output, duration)
+                self.data.insert_result(
+                    commit_id,
+                    tool=tool_name,
+                    status=status,
+                    output=output,
+                    duration=duration,
+                )
 
             logger.info("Stored test results for commit %s", commit_hash)
         except Exception as exc:  # pylint: disable=broad-except
@@ -610,7 +744,7 @@ class CIService:
                 logger.error(
                     "Failed to add repository to git tracker: %s (%s)", name, url
                 )
-                # Note: We don't delete the database entry here, as the git tracker may succeed later
+                # Note: We keep the database entry so the tracker can retry later.
 
         logger.info("Added repository: %s (%s)", name, url)
         return repo_id if repo_id is not None else 0
@@ -702,6 +836,7 @@ class CIService:
         role: str = "user",
         api_key: Optional[str] = None,
     ) -> int:
+        """Create a user account with hashed credentials."""
         if not username:
             raise ValueError("Username is required")
         if not password:
@@ -715,9 +850,11 @@ class CIService:
         return user_id
 
     def list_users(self) -> List[Dict[str, Any]]:
+        """Return all known user records."""
         return self.data.list_users()
 
     def remove_user(self, username: str) -> bool:
+        """Delete a user by username and report whether removal succeeded."""
         success = self.data.delete_user(username)
         if success:
             logger.info("Removed user %s", username)

@@ -2,15 +2,14 @@
 import os
 import logging
 import secrets
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Optional
 import hashlib
 import time
 import sqlite3
-import json
 
 # Try to import Flask
 try:
-    from flask import Flask, request, jsonify, Response
+    from flask import Flask, request, jsonify
 
     FLASK_AVAILABLE = True
 except ImportError:
@@ -141,11 +140,11 @@ class API:
             # Trigger a test run for the repository
             self.service.add_test_task(result["repository_id"], result["hash"])
             return jsonify({"status": "success", "message": "Webhook processed"})
-        else:
-            return (
-                jsonify({"status": "error", "message": "Invalid webhook payload"}),
-                400,
-            )
+
+        return (
+            jsonify({"status": "error", "message": "Invalid webhook payload"}),
+            400,
+        )
 
     def gitlab_webhook(self):
         """Handle GitLab webhook."""
@@ -163,11 +162,11 @@ class API:
             # Trigger a test run for the repository
             self.service.add_test_task(result["repository_id"], result["hash"])
             return jsonify({"status": "success", "message": "Webhook processed"})
-        else:
-            return (
-                jsonify({"status": "error", "message": "Invalid webhook payload"}),
-                400,
-            )
+
+        return (
+            jsonify({"status": "error", "message": "Invalid webhook payload"}),
+            400,
+        )
 
     def bitbucket_webhook(self):
         """Handle Bitbucket webhook."""
@@ -185,11 +184,11 @@ class API:
             # Trigger a test run for the repository
             self.service.add_test_task(result["repository_id"], result["hash"])
             return jsonify({"status": "success", "message": "Webhook processed"})
-        else:
-            return (
-                jsonify({"status": "error", "message": "Invalid webhook payload"}),
-                400,
-            )
+
+        return (
+            jsonify({"status": "error", "message": "Invalid webhook payload"}),
+            400,
+        )
 
     def generate_api_key_endpoint(self):
         """Generate API key endpoint."""
@@ -211,8 +210,8 @@ class API:
             )
             conn.commit()
             conn.close()
-        except Exception as e:
-            logger.error(f"Error storing API key: {e}")
+        except sqlite3.Error:
+            logger.exception("Error storing API key")
             return jsonify({"error": "Error storing API key"}), 500
 
         return jsonify({"api_key": api_key})
@@ -238,10 +237,10 @@ class API:
 
             if result:
                 return jsonify({"valid": True})
-            else:
-                return jsonify({"valid": False}), 401
-        except Exception as e:
-            logger.error(f"Error verifying API key: {e}")
+
+            return jsonify({"valid": False}), 401
+        except sqlite3.Error:
+            logger.exception("Error verifying API key")
             return jsonify({"error": "Error verifying API key"}), 500
 
     def list_repositories(self):
@@ -268,8 +267,8 @@ class API:
             ]
 
             return jsonify({"repositories": result})
-        except Exception as e:
-            logger.error(f"Error listing repositories: {e}")
+        except sqlite3.Error:
+            logger.exception("Error listing repositories")
             return jsonify({"error": "Error listing repositories"}), 500
 
     def get_repository(self, repo_id):
@@ -296,10 +295,10 @@ class API:
                     "last_check": repository[4],
                 }
                 return jsonify(result)
-            else:
-                return jsonify({"error": "Repository not found"}), 404
-        except Exception as e:
-            logger.error(f"Error getting repository: {e}")
+
+            return jsonify({"error": "Repository not found"}), 404
+        except sqlite3.Error:
+            logger.exception("Error getting repository")
             return jsonify({"error": "Error getting repository"}), 500
 
     def add_repository(self):
@@ -318,11 +317,11 @@ class API:
             result = self.service.add_repository(url, name)
             if result:
                 return jsonify({"status": "success", "repository_id": result})
-            else:
-                return jsonify({"error": "Error adding repository"}), 500
-        except Exception as e:
-            logger.error(f"Error adding repository: {e}")
-            return jsonify({"error": str(e)}), 500
+
+            return jsonify({"error": "Error adding repository"}), 500
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            logger.exception("Error adding repository")
+            return jsonify({"error": str(error)}), 500
 
     def remove_repository(self, repo_id):
         """Remove repository endpoint."""
@@ -333,11 +332,11 @@ class API:
             result = self.service.remove_repository(repo_id)
             if result:
                 return jsonify({"status": "success"})
-            else:
-                return jsonify({"error": "Repository not found"}), 404
-        except Exception as e:
-            logger.error(f"Error removing repository: {e}")
-            return jsonify({"error": str(e)}), 500
+
+            return jsonify({"error": "Repository not found"}), 404
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            logger.exception("Error removing repository")
+            return jsonify({"error": str(error)}), 500
 
     def get_test_results(self, repo_id):
         """Get test results endpoint."""
@@ -348,8 +347,12 @@ class API:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, repository_id, commit_hash, status, created_at, completed_at FROM test_runs "
-                "WHERE repository_id = ? ORDER BY created_at DESC",
+                """
+                SELECT id, repository_id, commit_hash, status, created_at, completed_at
+                FROM test_runs
+                WHERE repository_id = ?
+                ORDER BY created_at DESC
+                """,
                 (repo_id,),
             )
             test_runs = cursor.fetchall()
@@ -368,8 +371,8 @@ class API:
 
             conn.close()
             return jsonify({"test_runs": result})
-        except Exception as e:
-            logger.error(f"Error getting test results: {e}")
+        except sqlite3.Error:
+            logger.exception("Error getting test results")
             return jsonify({"error": "Error getting test results"}), 500
 
     def get_latest_test_results(self):
@@ -381,9 +384,17 @@ class API:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT tr.id, tr.repository_id, r.name, tr.commit_hash, tr.status, tr.created_at, tr.completed_at "
-                "FROM test_runs tr JOIN repositories r ON tr.repository_id = r.id "
-                "WHERE tr.id IN (SELECT MAX(id) FROM test_runs GROUP BY repository_id)"
+                """
+                SELECT tr.id, tr.repository_id, r.name, tr.commit_hash, tr.status,
+                       tr.created_at, tr.completed_at
+                FROM test_runs tr
+                JOIN repositories r ON tr.repository_id = r.id
+                WHERE tr.id IN (
+                    SELECT MAX(id)
+                    FROM test_runs
+                    GROUP BY repository_id
+                )
+                """
             )
             test_runs = cursor.fetchall()
 
@@ -402,8 +413,8 @@ class API:
 
             conn.close()
             return jsonify({"test_runs": result})
-        except Exception as e:
-            logger.error(f"Error getting latest test results: {e}")
+        except sqlite3.Error:
+            logger.exception("Error getting latest test results")
             return jsonify({"error": "Error getting latest test results"}), 500
 
     def generate_api_key(self) -> str:
@@ -423,7 +434,9 @@ class API:
             debug: Whether to run in debug mode
         """
         # self.app.run(host=host, port=port, debug=debug)  # Uncomment when Flask is installed
-        logger.info(f"API server would run on {host}:{port} (debug={debug})")
+        logger.info(
+            "API server would run on %s:%s (debug=%s)", host, port, debug
+        )
         logger.info("Flask is not installed yet, so this is just a placeholder")
 
 
@@ -446,6 +459,6 @@ def create_app(
 
     if FLASK_AVAILABLE and api.app is not None:
         return api.app
-    else:
-        logger.warning("Flask is not installed, API server will not be available")
-        return None
+
+    logger.warning("Flask is not installed, API server will not be available")
+    return None

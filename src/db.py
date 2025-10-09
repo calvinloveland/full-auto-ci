@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 class DataAccess:
     """Lightweight data-access helper around the SQLite database."""
 
+    # pylint: disable=too-many-public-methods
+
     def __init__(self, db_path: str):
         self.db_path = db_path
 
@@ -124,25 +126,44 @@ class DataAccess:
 
             # Helpful indexes for frequent lookups
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_repositories_status ON repositories(status)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_repositories_status
+                ON repositories(status)
+                """
             )
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_commits_repo_hash ON commits(repository_id, commit_hash)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_commits_repo_hash
+                ON commits(repository_id, commit_hash)
+                """
             )
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_results_commit ON results(commit_id)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_results_commit
+                ON results(commit_id)
+                """
             )
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_test_runs_repo_status ON test_runs(repository_id, status)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_test_runs_repo_status
+                ON test_runs(repository_id, status)
+                """
             )
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_test_runs_repo_commit ON test_runs(repository_id, commit_hash)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_test_runs_repo_commit
+                ON test_runs(repository_id, commit_hash)
+                """
             )
 
     @staticmethod
     def _ensure_column(
         cursor: sqlite3.Cursor, table: str, column: str, definition_suffix: str
     ) -> bool:
+        """Add a column to ``table`` when it's missing.
+
+        Returns ``True`` when the column was added.
+        """
         cursor.execute(f"PRAGMA table_info({table})")
         columns = [row[1] for row in cursor.fetchall()]
         if column in columns:
@@ -151,6 +172,7 @@ class DataAccess:
         return True
 
     def create_repository(self, name: str, url: str, branch: str) -> int:
+        """Insert a repository record and return its identifier."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -160,16 +182,22 @@ class DataAccess:
             return int(cursor.lastrowid or 0)
 
     def delete_repository(self, repo_id: int) -> bool:
+        """Delete a repository by ``repo_id`` and report success."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM repositories WHERE id = ?", (repo_id,))
             return cursor.rowcount > 0
 
     def fetch_repository(self, repo_id: int) -> Optional[Dict[str, Any]]:
+        """Return a repository row as a dictionary or ``None`` when missing."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, name, url, branch, status, last_check FROM repositories WHERE id = ?",
+                """
+                SELECT id, name, url, branch, status, last_check
+                FROM repositories
+                WHERE id = ?
+                """,
                 (repo_id,),
             )
             row = cursor.fetchone()
@@ -187,10 +215,14 @@ class DataAccess:
         }
 
     def list_repositories(self) -> List[Dict[str, Any]]:
+        """Return all repositories as a list of dictionaries."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, name, url, branch, status, last_check FROM repositories"
+                """
+                SELECT id, name, url, branch, status, last_check
+                FROM repositories
+                """
             )
             rows = cursor.fetchall()
 
@@ -207,6 +239,7 @@ class DataAccess:
         ]
 
     def update_repository_last_check(self, repo_id: int, timestamp: int):
+        """Persist the ``timestamp`` of the last repository polling cycle."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -215,6 +248,7 @@ class DataAccess:
             )
 
     def get_commit_id(self, repo_id: int, commit_hash: str) -> Optional[int]:
+        """Return the primary key for ``commit_hash`` within ``repo_id``."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -225,13 +259,22 @@ class DataAccess:
         return int(result[0]) if result else None
 
     def create_commit(
-        self,
-        repo_id: int,
-        commit_hash: str,
-        author: Optional[str] = None,
-        message: Optional[str] = None,
-        timestamp: Optional[int] = None,
+        self, repo_id: int, commit_hash: str, **metadata: Any
     ) -> int:
+        """Insert a commit row and return its identifier.
+
+        Accepted keyword arguments: ``author``, ``message``, and ``timestamp``.
+        """
+        allowed_keys = {"author", "message", "timestamp"}
+        unexpected_keys = set(metadata) - allowed_keys
+        if unexpected_keys:
+            invalid = ", ".join(sorted(unexpected_keys))
+            raise ValueError(f"Unsupported commit fields: {invalid}")
+
+        author = metadata.get("author")
+        message = metadata.get("message")
+        timestamp = metadata.get("timestamp")
+
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -244,6 +287,7 @@ class DataAccess:
             return int(cursor.lastrowid or 0)
 
     def fetch_commit(self, repo_id: int, commit_hash: str) -> Optional[Dict[str, Any]]:
+        """Retrieve commit metadata for ``commit_hash`` within ``repo_id``."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -264,9 +308,23 @@ class DataAccess:
             "timestamp": row[3],
         }
 
-    def insert_result(
-        self, commit_id: int, tool: str, status: str, output: str, duration: float
-    ):
+    def insert_result(self, commit_id: int, **result: Any):
+        """Persist a tool execution result for ``commit_id``.
+
+        Expects keyword arguments ``tool``, ``status``, ``output``, and
+        ``duration``.
+        """
+        required_fields = ("tool", "status", "output", "duration")
+        missing_fields = [field for field in required_fields if field not in result]
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise ValueError(f"Missing result fields: {missing}")
+
+        tool = str(result["tool"])
+        status = str(result["status"])
+        output = str(result["output"])
+        duration = float(result["duration"])
+
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -280,6 +338,7 @@ class DataAccess:
     def create_test_run(
         self, repo_id: int, commit_hash: str, status: str, created_at: int
     ) -> int:
+        """Create a test run record and return its ID."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -294,6 +353,7 @@ class DataAccess:
     def get_latest_test_run(
         self, repo_id: int, commit_hash: str
     ) -> Optional[Tuple[int, str]]:
+        """Return the most recent test run ID and status for a commit."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -311,39 +371,47 @@ class DataAccess:
             return None
         return int(row[0]), str(row[1])
 
-    def update_test_run(
-        self,
-        test_run_id: int,
-        *,
-        status: Optional[str] = None,
-        started_at: Optional[int] = None,
-        completed_at: Optional[int] = None,
-        error: Optional[str] = None,
-    ):
-        updates: List[str] = []
+    def update_test_run(self, test_run_id: int, **updates: Optional[Any]):
+        """Apply partial updates to a test run row.
+
+        Supported keyword arguments are ``status``, ``started_at``,
+        ``completed_at``, and ``error``.
+        """
+        allowed_keys = {"status", "started_at", "completed_at", "error"}
+        unexpected_keys = set(updates) - allowed_keys
+        if unexpected_keys:
+            invalid = ", ".join(sorted(unexpected_keys))
+            raise ValueError(f"Unsupported test run fields: {invalid}")
+
+        status = updates.get("status")
+        started_at = updates.get("started_at")
+        completed_at = updates.get("completed_at")
+        error = updates.get("error")
+
+        assignments: List[str] = []
         params: List[Any] = []
 
         if status is not None:
-            updates.append("status = ?")
+            assignments.append("status = ?")
             params.append(status)
         if started_at is not None:
-            updates.append("started_at = ?")
+            assignments.append("started_at = ?")
             params.append(started_at)
         if completed_at is not None:
-            updates.append("completed_at = ?")
+            assignments.append("completed_at = ?")
             params.append(completed_at)
-        if error is not None or (status in {"completed", "error"} and error is None):
-            updates.append("error = ?")
+        if "error" in updates or (status in {"completed", "error"} and error is None):
+            assignments.append("error = ?")
             params.append(error)
 
-        if not updates:
+        if not assignments:
             return
 
         params.append(test_run_id)
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE test_runs SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE test_runs SET {', '.join(assignments)} WHERE id = ?",
                 params,
             )
 
@@ -476,6 +544,7 @@ class DataAccess:
         role: str = "user",
         api_key_hash: Optional[str] = None,
     ) -> int:
+        """Create a user account and return its identifier."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             try:
@@ -491,10 +560,15 @@ class DataAccess:
             return int(cursor.lastrowid or 0)
 
     def list_users(self) -> List[Dict[str, Any]]:
+        """Return all users sorted by username."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, username, role, created_at FROM users ORDER BY username COLLATE NOCASE"
+                """
+                SELECT id, username, role, created_at
+                FROM users
+                ORDER BY username COLLATE NOCASE
+                """
             )
             rows = cursor.fetchall()
         return [
@@ -508,16 +582,22 @@ class DataAccess:
         ]
 
     def delete_user(self, username: str) -> bool:
+        """Remove a user by username and report whether a row was deleted."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM users WHERE username = ?", (username,))
             return cursor.rowcount > 0
 
     def get_user_credentials(self, username: str) -> Optional[Dict[str, Any]]:
+        """Return credential data for ``username`` or ``None`` when missing."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+                """
+                SELECT id, username, password_hash, role
+                FROM users
+                WHERE username = ?
+                """,
                 (username,),
             )
             row = cursor.fetchone()

@@ -7,9 +7,10 @@ import contextlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..service import CIService
+from .. import __version__ as PACKAGE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,8 @@ class MCPError(Exception):
     data: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the error into a JSON-RPC compliant dictionary."""
+
         payload: Dict[str, Any] = {"code": self.code, "message": self.message}
         if self.data is not None:
             payload["data"] = self.data
@@ -32,10 +35,20 @@ class MCPError(Exception):
 class MCPServer:
     """Minimal JSON-RPC server exposing CIService over MCP."""
 
+    _SUPPORTED_PROTOCOL_VERSIONS = {
+        "2025-06-18",
+        "2024-12-06",
+    }
+
+    _DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+
     def __init__(self, service: CIService, *, auth_token: str | None = None):
+        """Initialize the MCP server with the backing CI service and optional token."""
+
         self.service = service
         self.auth_token = auth_token
         self._methods: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
+            "initialize": self._handle_initialize,
             "handshake": self._handle_handshake,
             "listRepositories": self._handle_list_repositories,
             "queueTestRun": self._handle_queue_test_run,
@@ -62,7 +75,7 @@ class MCPServer:
         if not isinstance(params, dict):
             raise MCPError(code=-32602, message="Params must be an object")
 
-        self._verify_token(params)
+        self._verify_token(method, params)
 
         try:
             result = await handler(params)
@@ -77,32 +90,63 @@ class MCPServer:
         return response
 
     async def _handle_handshake(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the server identity and advertised capabilities."""
+
         return {
             "name": "full-auto-ci",
-            "version": "0.1.0",
-            "capabilities": [
-                {
-                    "name": "listRepositories",
-                    "description": "List all repositories tracked by the CI service.",
-                },
-                {
-                    "name": "queueTestRun",
-                    "description": "Queue a test run for a repository/commit pair.",
-                },
-                {
-                    "name": "getLatestResults",
-                    "description": "Fetch recent test runs with tool results for a repository.",
-                },
-            ],
+            "version": PACKAGE_VERSION,
+            "capabilities": self._legacy_capabilities(),
+        }
+
+    async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Negotiate protocol support per the MCP initialize handshake."""
+
+        protocol_version = params.get("protocolVersion")
+        if not isinstance(protocol_version, str) or not protocol_version:
+            raise MCPError(code=-32602, message="protocolVersion must be a non-empty string")
+
+        client_info = params.get("clientInfo")
+        if not isinstance(client_info, dict):
+            raise MCPError(code=-32602, message="clientInfo must be an object")
+
+        capabilities = params.get("capabilities")
+        if not isinstance(capabilities, dict):
+            raise MCPError(code=-32602, message="capabilities must be an object")
+
+        if protocol_version not in self._SUPPORTED_PROTOCOL_VERSIONS:
+            logger.debug(
+                "Client requested unsupported protocol version %s; defaulting to %s",
+                protocol_version,
+                self._DEFAULT_PROTOCOL_VERSION,
+            )
+            negotiated_version = self._DEFAULT_PROTOCOL_VERSION
+        else:
+            negotiated_version = protocol_version
+
+        return {
+            "protocolVersion": negotiated_version,
+            "serverInfo": {
+                "name": "full-auto-ci",
+                "version": PACKAGE_VERSION,
+            },
+            "capabilities": self._server_capabilities(),
+            "instructions": (
+                "This server exposes Full Auto CI operations via the listRepositories, "
+                "queueTestRun, and getLatestResults methods."
+            ),
         }
 
     async def _handle_list_repositories(
         self, _params: Dict[str, Any]
     ) -> Dict[str, Any]:
+        """Expose the repository catalog tracked by the CI service."""
+
         repositories = self.service.list_repositories()
         return {"repositories": repositories}
 
     async def _handle_queue_test_run(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Enqueue a CI test run for the provided repository and commit."""
+
         repo_id = params.get("repositoryId")
         commit_hash = params.get("commit")
         if not isinstance(repo_id, int):
@@ -122,6 +166,8 @@ class MCPServer:
     async def _handle_get_latest_results(
         self, params: Dict[str, Any]
     ) -> Dict[str, Any]:
+        """Fetch recent test runs for a repository."""
+
         repo_id = params.get("repositoryId")
         limit = params.get("limit", 5)
         if not isinstance(repo_id, int):
@@ -132,10 +178,22 @@ class MCPServer:
         test_runs = self.service.get_test_results(repo_id, limit=limit)
         return {"testRuns": test_runs}
 
-    def _verify_token(self, params: Dict[str, Any]) -> None:
+    def _verify_token(self, method: str, params: Dict[str, Any]) -> None:
+        """Validate the shared secret token if authentication is enabled."""
+
         if not self.auth_token:
             return
         provided = params.get("token")
+        if provided is None and method == "initialize":
+            client_caps = params.get("capabilities")
+            if isinstance(client_caps, dict):
+                experimental_caps = client_caps.get("experimental")
+                if isinstance(experimental_caps, dict):
+                    token_container = experimental_caps.get("fullAutoCI")
+                    if isinstance(token_container, dict):
+                        provided = token_container.get("token") or token_container.get(
+                            "authToken"
+                        )
         if provided != self.auth_token:
             raise MCPError(code=-32604, message="Unauthorized")
 
@@ -202,4 +260,37 @@ class MCPServer:
 
     @staticmethod
     def _error_response(message_id: Any, error: MCPError) -> Dict[str, Any]:
+        """Return a JSON-RPC error response payload."""
+
         return {"jsonrpc": "2.0", "id": message_id, "error": error.to_dict()}
+
+    @staticmethod
+    def _legacy_capabilities() -> List[Dict[str, str]]:
+        """Return legacy capability descriptions for backwards compatibility."""
+
+        return [
+            {
+                "name": "listRepositories",
+                "description": "List all repositories tracked by the CI service.",
+            },
+            {
+                "name": "queueTestRun",
+                "description": "Queue a test run for a repository/commit pair.",
+            },
+            {
+                "name": "getLatestResults",
+                "description": "Fetch recent test runs with tool results for a repository.",
+            },
+        ]
+
+    @classmethod
+    def _server_capabilities(cls) -> Dict[str, Any]:
+        """Expose server capabilities in MCP-compliant format."""
+
+        return {
+            "experimental": {
+                "fullAutoCI": {
+                    "methods": [cap["name"] for cap in cls._legacy_capabilities()],
+                }
+            }
+        }

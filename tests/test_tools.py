@@ -2,8 +2,8 @@
 import unittest
 from unittest.mock import patch, MagicMock
 import tempfile
-import os
 import json
+from pathlib import Path
 
 from src.tools import Tool, Pylint, Coverage, ToolRunner
 
@@ -50,7 +50,8 @@ class TestPylint(unittest.TestCase):
         mock_run.return_value = mock_process
 
         # Run Pylint
-        result = self.pylint.run("/path/to/repo")
+        with patch.object(self.pylint, "_discover_targets", return_value=["src"]):
+            result = self.pylint.run("/path/to/repo")
 
         # Verify the result
         self.assertEqual(result["status"], "success")
@@ -58,6 +59,13 @@ class TestPylint(unittest.TestCase):
         self.assertEqual(result["issues"]["convention"], 1)
         self.assertEqual(result["issues"]["warning"], 1)
         self.assertEqual(result["issues"]["error"], 1)
+        mock_run.assert_called_with(
+            ["pylint", "--output-format=json", "src"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd="/path/to/repo",
+        )
 
     @patch("subprocess.run")
     def test_run_fail(self, mock_run):
@@ -70,7 +78,8 @@ class TestPylint(unittest.TestCase):
         mock_run.return_value = mock_process
 
         # Run Pylint
-        result = self.pylint.run("/path/to/repo")
+        with patch.object(self.pylint, "_discover_targets", return_value=["src"]):
+            result = self.pylint.run("/path/to/repo")
 
         # Verify the result
         self.assertEqual(result["status"], "error")
@@ -86,11 +95,46 @@ class TestPylint(unittest.TestCase):
         mock_run.return_value = mock_process
 
         # Run Pylint
-        result = self.pylint.run("/path/to/repo")
+        with patch.object(self.pylint, "_discover_targets", return_value=["src"]):
+            result = self.pylint.run("/path/to/repo")
 
         # Verify the result
         self.assertEqual(result["status"], "error")
         self.assertIn("error", result)
+
+    def test_discover_targets_prefers_src_packages(self):
+        """Pylint should target packages inside the src directory when present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package = Path(tmpdir) / "src" / "full_auto_ci"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+
+            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            self.assertEqual(targets, ["src/full_auto_ci"])
+
+    def test_discover_targets_respects_config(self):
+        """When explicit config exists, run Pylint from repository root."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".pylintrc").write_text("", encoding="utf-8")
+
+            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            self.assertEqual(targets, ["."])
+
+    def test_discover_targets_falls_back_to_packages(self):
+        """If no src directory exists, fall back to top-level Python packages."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pkg = Path(tmpdir) / "myapp"
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+
+            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            self.assertEqual(targets, ["myapp"])
+
+    def test_discover_targets_defaults_to_repo(self):
+        """If no obvious directories are found, lint the whole repo."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            targets = self.pylint._discover_targets(tmpdir)  # pylint: disable=protected-access
+            self.assertEqual(targets, ["."])
 
 
 class TestCoverage(unittest.TestCase):
@@ -166,6 +210,7 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual(result["files"][0]["coverage"], 90.0)
         self.assertEqual(result["files"][1]["filename"], "file2.py")
         self.assertEqual(result["files"][1]["coverage"], 80.0)
+        self.assertEqual(mock_chdir.call_args_list[0][0][0], "/path/to/repo")
 
     @patch("os.chdir")
     @patch("subprocess.run")
@@ -185,6 +230,7 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("error", result)
         self.assertEqual(result["error"], "Test run failed with return code 1")
+        self.assertEqual(mock_chdir.call_args_list[0][0][0], "/path/to/repo")
 
 
 class TestToolRunner(unittest.TestCase):

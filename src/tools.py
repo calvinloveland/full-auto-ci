@@ -2,7 +2,7 @@
 import os
 import logging
 import subprocess
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional
 import json
 import xml.etree.ElementTree as ET
 
@@ -13,7 +13,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class Tool:
+class Tool:  # pylint: disable=too-few-public-methods
     """Base class for all tools."""
 
     def __init__(self, name: str):
@@ -36,7 +36,7 @@ class Tool:
         raise NotImplementedError("Subclasses must implement this method")
 
 
-class Pylint(Tool):
+class Pylint(Tool):  # pylint: disable=too-few-public-methods
     """Pylint code analysis tool."""
 
     def __init__(self):
@@ -53,10 +53,19 @@ class Pylint(Tool):
             Pylint results
         """
         try:
-            # Run Pylint and capture output
-            logger.info(f"Running Pylint on {repo_path}")
-            cmd = ["pylint", "--output-format=json", repo_path]
-            process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            targets = self._discover_targets(repo_path)
+            logger.info(
+                "Running Pylint on %s (targets: %s)", repo_path, ", ".join(targets)
+            )
+
+            cmd = ["pylint", "--output-format=json", *targets]
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_path,
+            )
 
             # Parse Pylint output
             if process.returncode >= 0 and process.stdout:
@@ -95,19 +104,102 @@ class Pylint(Tool):
                     logger.error("Failed to parse Pylint JSON output")
                     return {"status": "error", "error": "Failed to parse Pylint output"}
             else:
-                logger.error(f"Pylint failed with return code {process.returncode}")
+                logger.error(
+                    "Pylint failed with return code %s", process.returncode
+                )
                 return {
                     "status": "error",
                     "error": f"Pylint failed with return code {process.returncode}",
                     "stdout": process.stdout,
                     "stderr": process.stderr,
                 }
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             logger.exception("Error running Pylint")
             return {"status": "error", "error": str(e)}
 
+    def _discover_targets(self, repo_path: str) -> List[str]:
+        """Determine which paths Pylint should analyze for the given repository."""
 
-class Coverage(Tool):
+        if self._has_explicit_config(repo_path):
+            return ["."]
+
+        targets: List[str] = []
+
+        src_dir = os.path.join(repo_path, "src")
+        if os.path.isdir(src_dir):
+            packages = self._package_directories(src_dir)
+            if packages:
+                targets.extend([os.path.join("src", pkg) for pkg in packages])
+            else:
+                targets.append("src")
+
+        if not targets:
+            root_packages = self._package_directories(repo_path)
+            if root_packages:
+                targets.extend(root_packages)
+
+        if not targets:
+            return ["."]
+
+        seen = set()
+        unique_targets: List[str] = []
+        for target in targets:
+            if target not in seen:
+                seen.add(target)
+                unique_targets.append(target)
+
+        return unique_targets
+
+    def _package_directories(self, base_path: str) -> List[str]:
+        """Return Python package directories directly under ``base_path``."""
+
+        try:
+            entries = sorted(os.listdir(base_path))
+        except OSError:
+            return []
+
+        packages: List[str] = []
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            full_path = os.path.join(base_path, entry)
+            if not os.path.isdir(full_path):
+                continue
+            init_file = os.path.join(full_path, "__init__.py")
+            if os.path.isfile(init_file):
+                packages.append(entry)
+        return packages
+
+    def _has_explicit_config(self, repo_path: str) -> bool:
+        """Return True if the repository supplies its own Pylint configuration."""
+
+        config_files = [".pylintrc", "pylintrc"]
+        for config in config_files:
+            if os.path.isfile(os.path.join(repo_path, config)):
+                return True
+
+        setup_cfg = os.path.join(repo_path, "setup.cfg")
+        if self._file_contains(setup_cfg, "[pylint]"):
+            return True
+
+        pyproject = os.path.join(repo_path, "pyproject.toml")
+        if self._file_contains(pyproject, "[tool.pylint"):
+            return True
+
+        return False
+
+    def _file_contains(self, path: str, needle: str) -> bool:
+        if not os.path.isfile(path):
+            return False
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return needle in handle.read()
+        except OSError:
+            return False
+
+
+class Coverage(Tool):  # pylint: disable=too-few-public-methods
     """Coverage measurement tool."""
 
     def __init__(self, run_tests_cmd: Optional[List[str]] = None):
@@ -135,7 +227,7 @@ class Coverage(Tool):
 
             try:
                 # Run tests with coverage
-                logger.info(f"Running coverage on {repo_path}")
+                logger.info("Running coverage on %s", repo_path)
                 cmd = ["coverage", "run", "-m"] + self.run_tests_cmd
                 process = subprocess.run(
                     cmd, capture_output=True, text=True, check=False
@@ -143,7 +235,7 @@ class Coverage(Tool):
 
                 if process.returncode != 0:
                     logger.error(
-                        f"Test run failed with return code {process.returncode}"
+                        "Test run failed with return code %s", process.returncode
                     )
                     return {
                         "status": "error",
@@ -160,11 +252,15 @@ class Coverage(Tool):
 
                 if process.returncode != 0:
                     logger.error(
+                        "Coverage XML generation failed with return code %s",
+                        process.returncode,
+                    )
+                    error_message = (
                         f"Coverage XML generation failed with return code {process.returncode}"
                     )
                     return {
                         "status": "error",
-                        "error": f"Coverage XML generation failed with return code {process.returncode}",
+                        "error": error_message,
                         "stdout": process.stdout,
                         "stderr": process.stderr,
                     }
@@ -196,7 +292,7 @@ class Coverage(Tool):
             finally:
                 # Return to original directory
                 os.chdir(original_dir)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             logger.exception("Error running Coverage")
             return {"status": "error", "error": str(e)}
 
