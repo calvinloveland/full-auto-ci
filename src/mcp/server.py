@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -53,12 +54,20 @@ class MCPServer:
             "listRepositories": self._handle_list_repositories,
             "queueTestRun": self._handle_queue_test_run,
             "getLatestResults": self._handle_get_latest_results,
+            "addRepository": self._handle_add_repository,
+            "removeRepository": self._handle_remove_repository,
+            "runTests": self._handle_run_tests,
         }
 
-    async def handle_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a single JSON-RPC message and return the response object."""
+    async def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Process a single JSON-RPC message and return the response object.
+
+        Returns ``None`` when the message is a JSON-RPC notification that does not
+        require a response.
+        """
 
         logger.info("MCP request %s (id=%s)", message.get("method"), message.get("id"))
+        logger.debug("MCP request payload: %s", message)
 
         if message.get("jsonrpc") != "2.0":
             raise MCPError(code=-32600, message="Invalid JSON-RPC version")
@@ -67,15 +76,22 @@ class MCPServer:
         if not isinstance(method, str):
             raise MCPError(code=-32600, message="Method must be a string")
 
+        message_id = message.get("id")
+        is_notification = message_id is None
+
         handler = self._methods.get(method)
         if handler is None:
+            if is_notification:
+                logger.debug("Ignoring unknown notification %s", method)
+                return None
             raise MCPError(code=-32601, message=f"Method not found: {method}")
 
         params = message.get("params") or {}
         if not isinstance(params, dict):
             raise MCPError(code=-32602, message="Params must be an object")
 
-        self._verify_token(method, params)
+        if not is_notification:
+            self._verify_token(method, params)
 
         try:
             result = await handler(params)
@@ -85,7 +101,17 @@ class MCPServer:
             logger.exception("Unhandled exception in MCP handler %s", method)
             raise MCPError(code=-32000, message=str(exc)) from exc
 
-        response = {"jsonrpc": "2.0", "id": message.get("id"), "result": result}
+        if is_notification:
+            logger.debug("Notification %s handled without response", method)
+            return None
+
+        response = {"jsonrpc": "2.0", "id": message_id, "result": result}
+        logger.debug(
+            "MCP response payload for %s (id=%s): %s",
+            method,
+            message.get("id"),
+            response,
+        )
         logger.info(
             "MCP response for %s (id=%s)",
             method,
@@ -105,29 +131,64 @@ class MCPServer:
     async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Negotiate protocol support per the MCP initialize handshake."""
 
-        protocol_version = params.get("protocolVersion")
-        if not isinstance(protocol_version, str) or not protocol_version:
-            raise MCPError(
-                code=-32602, message="protocolVersion must be a non-empty string"
+        logger.debug("Initialize request received with params: %s", params)
+
+        protocol_candidates: List[str] = []
+        requested_version = params.get("protocolVersion")
+        if isinstance(requested_version, str) and requested_version.strip():
+            protocol_candidates.append(requested_version.strip())
+
+        requested_versions = params.get("protocolVersions")
+        if isinstance(requested_versions, list):
+            protocol_candidates.extend(
+                version.strip()
+                for version in requested_versions
+                if isinstance(version, str) and version.strip()
             )
 
-        client_info = params.get("clientInfo")
-        if not isinstance(client_info, dict):
-            raise MCPError(code=-32602, message="clientInfo must be an object")
-
-        capabilities = params.get("capabilities")
-        if not isinstance(capabilities, dict):
-            raise MCPError(code=-32602, message="capabilities must be an object")
-
-        if protocol_version not in self._SUPPORTED_PROTOCOL_VERSIONS:
+        if not protocol_candidates:
             logger.debug(
-                "Client requested unsupported protocol version %s; defaulting to %s",
-                protocol_version,
+                "Client omitted protocol version; falling back to default %s",
+                self._DEFAULT_PROTOCOL_VERSION,
+            )
+            protocol_candidates.append(self._DEFAULT_PROTOCOL_VERSION)
+
+        negotiated_version = next(
+            (
+                version
+                for version in protocol_candidates
+                if version in self._SUPPORTED_PROTOCOL_VERSIONS
+            ),
+            self._DEFAULT_PROTOCOL_VERSION,
+        )
+
+        if negotiated_version not in self._SUPPORTED_PROTOCOL_VERSIONS:
+            logger.debug(
+                "Client requested unsupported protocol versions %s; defaulting to %s",
+                protocol_candidates,
                 self._DEFAULT_PROTOCOL_VERSION,
             )
             negotiated_version = self._DEFAULT_PROTOCOL_VERSION
-        else:
-            negotiated_version = protocol_version
+
+        client_info = params.get("clientInfo")
+        if not isinstance(client_info, dict):
+            client_info = {}
+
+        capabilities = params.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+
+        logger.debug(
+            "Initialize negotiation complete. candidates=%s, negotiated=%s, client=%s",
+            protocol_candidates,
+            negotiated_version,
+            client_info or "<unknown>",
+        )
+
+        logger.debug(
+            "Client capabilities provided: top-level keys=%s",
+            sorted(capabilities.keys()),
+        )
 
         response = {
             "protocolVersion": negotiated_version,
@@ -137,7 +198,8 @@ class MCPServer:
             },
             "capabilities": self._server_capabilities(),
             "instructions": (
-                "This server exposes Full Auto CI operations via the listRepositories, "
+                "This server exposes Full Auto CI operations via the "
+                "listRepositories, addRepository, removeRepository, runTests, "
                 "queueTestRun, and getLatestResults methods."
             ),
         }
@@ -182,20 +244,95 @@ class MCPServer:
         """Fetch recent test runs for a repository."""
 
         repo_id = params.get("repositoryId")
+        commit_hash = params.get("commit")
         limit = params.get("limit", 5)
         if not isinstance(repo_id, int):
             raise MCPError(code=-32602, message="repositoryId must be an integer")
         if not isinstance(limit, int) or limit <= 0:
             raise MCPError(code=-32602, message="limit must be a positive integer")
+        if commit_hash is not None:
+            if not isinstance(commit_hash, str) or not commit_hash.strip():
+                raise MCPError(
+                    code=-32602,
+                    message="commit must be a non-empty string when provided",
+                )
+            commit_hash = commit_hash.strip()
 
-        test_runs = self.service.get_test_results(repo_id, limit=limit)
+        test_runs = self.service.get_test_results(
+            repo_id,
+            limit=limit,
+            commit_hash=commit_hash,
+        )
         return {"testRuns": test_runs}
+
+    async def _handle_add_repository(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Register a new repository with the CI service."""
+
+        name = params.get("name")
+        url = params.get("url")
+        branch = params.get("branch", "main")
+
+        if not isinstance(name, str) or not name.strip():
+            raise MCPError(code=-32602, message="name must be a non-empty string")
+        if not isinstance(url, str) or not url.strip():
+            raise MCPError(code=-32602, message="url must be a non-empty string")
+        if not isinstance(branch, str) or not branch.strip():
+            raise MCPError(code=-32602, message="branch must be a non-empty string")
+
+        repo_id = self.service.add_repository(name.strip(), url.strip(), branch.strip())
+        if not repo_id:
+            raise MCPError(
+                code=-32002,
+                message="Failed to add repository",
+                data={"name": name, "url": url, "branch": branch},
+            )
+
+        return {"repositoryId": repo_id}
+
+    async def _handle_remove_repository(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove a repository from the CI service."""
+
+        repo_id = params.get("repositoryId")
+        if not isinstance(repo_id, int) or repo_id <= 0:
+            raise MCPError(code=-32602, message="repositoryId must be a positive integer")
+
+        success = self.service.remove_repository(repo_id)
+        if not success:
+            raise MCPError(
+                code=-32003,
+                message="Failed to remove repository",
+                data={"repositoryId": repo_id},
+            )
+
+        return {"removed": True, "repositoryId": repo_id}
+
+    async def _handle_run_tests(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run tests synchronously for a given repository and commit."""
+
+        repo_id = params.get("repositoryId")
+        commit_hash = params.get("commit")
+        if not isinstance(repo_id, int) or repo_id <= 0:
+            raise MCPError(code=-32602, message="repositoryId must be a positive integer")
+        if not isinstance(commit_hash, str) or not commit_hash.strip():
+            raise MCPError(code=-32602, message="commit must be a non-empty string")
+
+        result = self.service.run_tests(repo_id, commit_hash.strip())
+        status = result.get("status")
+        if status != "success":
+            raise MCPError(
+                code=-32004,
+                message="Test run failed",
+                data=result,
+            )
+
+        return {"status": status, "results": result}
 
     def _verify_token(self, method: str, params: Dict[str, Any]) -> None:
         """Validate the shared secret token if authentication is enabled."""
 
         if not self.auth_token:
             return
+        logger.debug("Authentication required for method %s", method)
         provided = params.get("token")
         if provided is None and method == "initialize":
             client_caps = params.get("capabilities")
@@ -207,9 +344,14 @@ class MCPServer:
                         provided = token_container.get("token") or token_container.get(
                             "authToken"
                         )
+                        if provided is not None:
+                            logger.debug("Token received via experimental capabilities")
+        elif provided is not None:
+            logger.debug("Token received directly in params")
         if provided != self.auth_token:
             logger.warning("MCP authentication failed for method %s", method)
             raise MCPError(code=-32604, message="Unauthorized")
+        logger.debug("Authentication succeeded for method %s", method)
 
     async def serve_tcp(
         self,
@@ -220,52 +362,16 @@ class MCPServer:
     ) -> None:
         """Start a plain TCP JSON-RPC loop bound to ``host:port``."""
 
+        logger.info(
+            "Starting MCP TCP server version %s on %s:%s",
+            PACKAGE_VERSION,
+            host,
+            port,
+        )
+
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             peer = writer.get_extra_info("peername")
-            logger.info("MCP client connected: %s", peer)
-            try:
-                while True:
-                    try:
-                        raw_message, framing = await self._read_transport_message(
-                            reader
-                        )
-                    except MCPError as transport_error:
-                        encoded = self._encode_message(
-                            self._error_response(None, transport_error), "newline"
-                        )
-                        writer.write(encoded)
-                        await writer.drain()
-                        continue
-                    if raw_message is None:
-                        break
-                    logger.info("Raw MCP payload (%s): %s", framing, raw_message)
-                    try:
-                        message = json.loads(raw_message)
-                    except json.JSONDecodeError as exc:
-                        error = MCPError(
-                            code=-32700,
-                            message="Parse error",
-                            data={"detail": str(exc)},
-                        )
-                        encoded = self._encode_message(
-                            self._error_response(None, error), framing
-                        )
-                        writer.write(encoded)
-                        await writer.drain()
-                        continue
-
-                    try:
-                        response = await self.handle_message(message)
-                    except MCPError as mcp_error:
-                        response = self._error_response(message.get("id"), mcp_error)
-                    encoded = self._encode_message(response, framing)
-                    writer.write(encoded)
-                    await writer.drain()
-            finally:
-                writer.close()
-                with contextlib.suppress(Exception):
-                    await writer.wait_closed()
-                logger.info("MCP client disconnected: %s", peer)
+            await self._serve_connection(reader, writer, peer)
 
         server = await asyncio.start_server(handler, host, port)
         sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
@@ -282,6 +388,37 @@ class MCPServer:
             server.close()
             await server.wait_closed()
             logger.info("MCP server stopped")
+
+    async def serve_stdio(
+        self, *, shutdown_event: asyncio.Event | None = None
+    ) -> None:
+        """Serve MCP requests over standard input/output streams."""
+
+        logger.info("Starting MCP stdio server version %s", PACKAGE_VERSION)
+        loop = asyncio.get_running_loop()
+
+        reader = asyncio.StreamReader()
+        reader_protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: reader_protocol, sys.stdin)
+
+        writer_transport, writer_protocol = await loop.connect_write_pipe(
+            lambda: asyncio.StreamReaderProtocol(asyncio.StreamReader()), sys.stdout
+        )
+        writer = asyncio.StreamWriter(writer_transport, writer_protocol, reader, loop)
+
+        try:
+            if shutdown_event is None:
+                await self._serve_connection(reader, writer, "stdio")
+            else:
+                await asyncio.gather(
+                    self._serve_connection(reader, writer, "stdio"),
+                    shutdown_event.wait(),
+                )
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            logger.info("MCP stdio server stopped")
 
     @staticmethod
     def _error_response(message_id: Any, error: MCPError) -> Dict[str, Any]:
@@ -351,6 +488,18 @@ class MCPServer:
                 "description": "List all repositories tracked by the CI service.",
             },
             {
+                "name": "addRepository",
+                "description": "Register a repository for automated CI monitoring.",
+            },
+            {
+                "name": "removeRepository",
+                "description": "Remove a repository so it is no longer monitored.",
+            },
+            {
+                "name": "runTests",
+                "description": "Execute the CI toolchain synchronously for a commit.",
+            },
+            {
                 "name": "queueTestRun",
                 "description": "Queue a test run for a repository/commit pair.",
             },
@@ -371,3 +520,67 @@ class MCPServer:
                 }
             }
         }
+
+    async def _serve_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        peer: Any,
+    ) -> None:
+        logger.info("MCP client connected: %s", peer)
+        try:
+            while True:
+                try:
+                    raw_message, framing = await self._read_transport_message(reader)
+                except MCPError as transport_error:
+                    error_response = self._error_response(None, transport_error)
+                    logger.debug("Transport error for %s: %s", peer, error_response)
+                    encoded = self._encode_message(error_response, "newline")
+                    writer.write(encoded)
+                    await writer.drain()
+                    continue
+                if raw_message is None:
+                    break
+                logger.info("Raw MCP payload (%s): %s", framing, raw_message)
+                logger.debug(
+                    "Decoding MCP message from %s with framing %s", peer, framing
+                )
+                try:
+                    message = json.loads(raw_message)
+                except json.JSONDecodeError as exc:
+                    error = MCPError(
+                        code=-32700,
+                        message="Parse error",
+                        data={"detail": str(exc)},
+                    )
+                    error_response = self._error_response(None, error)
+                    logger.debug("Parse error for %s: %s", peer, error_response)
+                    encoded = self._encode_message(error_response, framing)
+                    writer.write(encoded)
+                    await writer.drain()
+                    continue
+
+                try:
+                    response = await self.handle_message(message)
+                except MCPError as mcp_error:
+                    response = self._error_response(message.get("id"), mcp_error)
+                    logger.debug("Handler returned error for %s: %s", peer, response)
+
+                if response is None:
+                    logger.debug("No response required for message id=%s", message.get("id"))
+                    continue
+
+                encoded = self._encode_message(response, framing)
+                logger.debug(
+                    "Encoded MCP response (%s bytes, framing=%s) for id=%s",
+                    len(encoded),
+                    framing,
+                    message.get("id"),
+                )
+                writer.write(encoded)
+                await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            logger.info("MCP client disconnected: %s", peer)

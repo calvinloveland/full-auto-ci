@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from .dashboard import create_app
 from .mcp import MCPServer
 from .service import CIService
+from . import __version__ as PACKAGE_VERSION
 
 # Configure logging
 logging.basicConfig(
@@ -196,6 +197,16 @@ class CLI:
             action="store_true",
             help="Disable token requirement even if FULL_AUTO_CI_MCP_TOKEN is set",
         )
+        mcp_serve.add_argument(
+            "--log-level",
+            default="INFO",
+            help="Log level for the MCP server (e.g., DEBUG, INFO)",
+        )
+        mcp_serve.add_argument(
+            "--stdio",
+            action="store_true",
+            help="Serve the MCP protocol over standard input/output instead of TCP",
+        )
 
     def run(self, args: Optional[List[str]] = None) -> int:
         """Run the CLI with the given arguments.
@@ -347,6 +358,27 @@ class CLI:
         return handler(args)
 
     def _mcp_serve(self, args: argparse.Namespace) -> int:
+        try:
+            log_level = self._resolve_log_level(getattr(args, "log_level", "INFO"))
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        for handler in root_logger.handlers:
+            handler.setLevel(log_level)
+
+        logging.getLogger("src").setLevel(log_level)
+        logging.getLogger(__name__).setLevel(log_level)
+        logging.getLogger("src.mcp.server").setLevel(log_level)
+
+        logger.info(
+            "Launching MCP server version %s with log level %s",
+            PACKAGE_VERSION,
+            logging.getLevelName(log_level),
+        )
+
         token = None
         if not args.no_token:
             token = args.token or os.getenv("FULL_AUTO_CI_MCP_TOKEN")
@@ -356,23 +388,31 @@ class CLI:
         port = args.port
         token_state = "enabled" if token else "disabled"
 
-        probe_state = self._probe_mcp_server(host, port, token)
-        if probe_state == "available":
-            print(f"MCP server already running on {host}:{port} (token={token_state})")
-            return 0
-        if probe_state == "unauthorized":
-            print(
-                "Error: MCP server is already running but rejected the provided token."
-            )
-            return 1
+        if args.stdio:
+            print(f"Starting MCP server on stdio (token={token_state})")
+        else:
+            probe_state = self._probe_mcp_server(host, port, token)
+            if probe_state == "available":
+                print(
+                    f"MCP server already running on {host}:{port} (token={token_state})"
+                )
+                return 0
+            if probe_state == "unauthorized":
+                print(
+                    "Error: MCP server is already running but rejected the provided token."
+                )
+                return 1
 
-        print(f"Starting MCP server on {host}:{port} (token={token_state})")
+            print(f"Starting MCP server on {host}:{port} (token={token_state})")
 
         async def runner() -> None:
             try:
-                await server.serve_tcp(host=host, port=port)
+                if args.stdio:
+                    await server.serve_stdio()
+                else:
+                    await server.serve_tcp(host=host, port=port)
             except OSError as exc:  # pragma: no cover - depends on environment
-                if exc.errno == errno.EADDRINUSE:
+                if not args.stdio and exc.errno == errno.EADDRINUSE:
                     print(f"Error: MCP server port {host}:{port} is already in use.")
                     return
                 raise
@@ -913,6 +953,22 @@ class CLI:
         except Exception as error:  # pylint: disable=broad-except
             logger.warning("Unable to open browser for %s: %s", url, error)
 
+    @staticmethod
+    def _resolve_log_level(value: str) -> int:
+        if not value:
+            raise ValueError("Log level cannot be empty")
+
+        normalized = value.upper()
+        if normalized == "WARN":
+            normalized = "WARNING"
+
+        level = logging.getLevelName(normalized)
+        if isinstance(level, str):  # logging returns level name when unknown
+            raise ValueError(
+                "Invalid log level. Choose from CRITICAL, ERROR, WARNING, INFO, DEBUG, or NOTSET."
+            )
+
+        return level
 
 def main() -> int:
     """Entry point for the CLI."""

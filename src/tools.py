@@ -254,7 +254,10 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
                         "Coverage XML generation failed with return code %s",
                         process.returncode,
                     )
-                    error_message = f"Coverage XML generation failed with return code {process.returncode}"
+                    error_message = (
+                        "Coverage XML generation failed with return code "
+                        f"{process.returncode}"
+                    )
                     return {
                         "status": "error",
                         "error": error_message,

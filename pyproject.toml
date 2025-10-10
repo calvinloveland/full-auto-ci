@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "full_auto_ci"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fully automatic Continuous Integration"
 authors = [
     {name = "Full Auto CI Team", email = "example@example.com"}

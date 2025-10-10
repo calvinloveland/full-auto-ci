@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="full_auto_ci",
-    version="0.1.0",
+    version="0.1.1",
     description="Fully automatic Continuous Integration",
     author="Full Auto CI Team",
     packages=find_packages(),

@@ -1,10 +1,11 @@
 """Tests for the CLI module."""
 
+import asyncio
 import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.cli import CLI
 
@@ -451,6 +452,37 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mock_server_cls.assert_called_once_with(self.cli.service, auth_token="tok")
         mock_async_run.assert_called_once()
+
+    @patch("src.cli.asyncio.run")
+    @patch("src.cli.MCPServer")
+    def test_mcp_serve_stdio_command(self, mock_server_cls, mock_async_run):
+        mock_server = MagicMock()
+        mock_server.serve_stdio = AsyncMock(return_value=None)
+        mock_server_cls.return_value = mock_server
+
+        def fake_run(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        mock_async_run.side_effect = fake_run
+
+        with patch.object(self.cli, "_probe_mcp_server") as mock_probe:
+            exit_code = self.cli.run(
+                [
+                    "mcp",
+                    "serve",
+                    "--stdio",
+                    "--log-level",
+                    "DEBUG",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        mock_probe.assert_not_called()
+        mock_server.serve_stdio.assert_awaited_once()
 
     @patch("builtins.print")
     def test_mcp_serve_detects_existing_server(self, mock_print):
