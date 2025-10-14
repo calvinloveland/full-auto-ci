@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from . import __version__ as PACKAGE_VERSION
 from .dashboard import create_app
 from .mcp import MCPServer
+from .providers import ProviderConfigError
 from .service import CIService
 
 # Configure logging
@@ -104,6 +105,7 @@ class CLI:
         self._register_config_commands(subparsers)
         self._register_user_commands(subparsers)
         self._register_mcp_commands(subparsers)
+        self._register_provider_commands(subparsers)
         return parser
 
     def _register_service_commands(self, subparsers) -> None:
@@ -208,6 +210,46 @@ class CLI:
             help="Serve the MCP protocol over standard input/output instead of TCP",
         )
 
+    def _register_provider_commands(self, subparsers) -> None:
+        provider_parser = subparsers.add_parser(
+            "provider", help="External CI provider management"
+        )
+        provider_subparsers = provider_parser.add_subparsers(dest="provider_command")
+
+        provider_subparsers.add_parser("list", help="List configured providers")
+        provider_subparsers.add_parser("types", help="List available provider types")
+
+        add_parser = provider_subparsers.add_parser(
+            "add", help="Register a new external provider"
+        )
+        add_parser.add_argument("type", help="Provider type identifier (e.g. github)")
+        add_parser.add_argument("name", help="Display name for the provider")
+        add_parser.add_argument(
+            "--config",
+            help="Inline JSON configuration for the provider",
+        )
+        add_parser.add_argument(
+            "--config-file",
+            dest="config_file",
+            help="Path to a JSON file containing provider configuration",
+        )
+
+        remove_parser = provider_subparsers.add_parser(
+            "remove", help="Remove a configured provider"
+        )
+        remove_parser.add_argument("provider_id", type=int, help="Provider identifier")
+
+        sync_parser = provider_subparsers.add_parser(
+            "sync", help="Run a provider synchronization cycle"
+        )
+        sync_parser.add_argument("provider_id", type=int, help="Provider identifier")
+        sync_parser.add_argument(
+            "--limit",
+            type=int,
+            default=50,
+            help="Maximum number of runs to fetch (default: 50)",
+        )
+
     def run(self, args: Optional[List[str]] = None) -> int:
         """Run the CLI with the given arguments.
 
@@ -236,6 +278,7 @@ class CLI:
             "config": self._handle_config_command,
             "user": self._handle_user_command,
             "mcp": self._handle_mcp_command,
+            "provider": self._handle_provider_command,
         }
 
         handler = handler_map.get(parsed_args.command)
@@ -424,6 +467,118 @@ class CLI:
         except KeyboardInterrupt:
             print("MCP server stopped")
         return 0
+
+    def _handle_provider_command(self, args: argparse.Namespace) -> int:
+        handler_map = {
+            "list": self._provider_list,
+            "types": self._provider_types,
+            "add": self._provider_add,
+            "remove": self._provider_remove,
+            "sync": self._provider_sync,
+        }
+
+        command = getattr(args, "provider_command", None)
+        handler = handler_map.get(command)
+        if handler is None:
+            print(f"Error: Unknown provider command {command}")
+            return 1
+        return handler(args)
+
+    def _provider_list(self, _args: argparse.Namespace) -> int:
+        providers = self.service.list_providers()
+        if not providers:
+            print("No external providers configured.")
+            return 0
+
+        print("Configured providers:")
+        for provider in providers:
+            descriptor = provider.get("display_name") or provider["type"]
+            print(
+                f"  [{provider['id']}] {provider['name']} ({provider['type']}) -> {descriptor}"
+            )
+        return 0
+
+    def _provider_types(self, _args: argparse.Namespace) -> int:
+        types = list(self.service.get_provider_types())
+        if not types:
+            print("No provider types registered.")
+            return 0
+
+        print("Available provider types:")
+        for entry in types:
+            description = entry.get("description") or ""
+            suffix = f" - {description}" if description else ""
+            print(f"  {entry['type']}: {entry['display_name']}{suffix}")
+        return 0
+
+    def _provider_add(self, args: argparse.Namespace) -> int:
+        try:
+            config = self._load_provider_config(
+                inline=getattr(args, "config", None),
+                file_path=getattr(args, "config_file", None),
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        try:
+            provider = self.service.add_provider(args.type, args.name, config=config)
+        except (ProviderConfigError, ValueError) as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        print(
+            f"Provider '{provider.get('name', args.name)}' registered with id {provider.get('id')}"
+        )
+        return 0
+
+    def _provider_remove(self, args: argparse.Namespace) -> int:
+        removed = self.service.remove_provider(args.provider_id)
+        if removed:
+            print(f"Provider {args.provider_id} removed")
+            return 0
+        print(f"Error: Provider {args.provider_id} not found")
+        return 1
+
+    def _provider_sync(self, args: argparse.Namespace) -> int:
+        try:
+            runs = self.service.sync_provider(args.provider_id, limit=args.limit)
+        except KeyError:
+            print(f"Error: Provider {args.provider_id} not found")
+            return 1
+        except RuntimeError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        count = len(runs) if isinstance(runs, list) else 0
+        print(f"Synced provider {args.provider_id}; fetched {count} run(s)")
+        return 0
+
+    def _load_provider_config(
+        self,
+        *,
+        inline: Optional[str],
+        file_path: Optional[str],
+    ) -> Dict[str, Any]:
+        if inline and file_path:
+            raise ValueError("Specify either --config or --config-file, not both")
+
+        if file_path:
+            try:
+                with open(file_path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+            except FileNotFoundError as exc:  # pragma: no cover - pass through
+                raise ValueError(f"Configuration file not found: {file_path}") from exc
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in configuration file: {exc}") from exc
+
+        if inline:
+            try:
+                return json.loads(inline)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON payload: {exc}") from exc
+
+        return {}
 
     def _probe_mcp_server(
         self, host: str, port: int, token: Optional[str]

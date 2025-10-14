@@ -29,8 +29,8 @@
   - [x] Implement better output formatting
 
 - [ ] Improve test coverage
-  - [ ] Integration tests
-  - [ ] End-to-end tests
+  - [x] Integration tests *(see `tests/test_integration_service_flow.py`)*
+  - [x] End-to-end tests *(CLI+service flow exercised in `tests/test_integration_service_flow.py`)*
   - [x] Add dashboard template regression tests *(see `tests/test_dashboard.py`)*
   - [ ] Stand up browser automation suite *(Playwright or Selenium; capture smoke flows for dashboard)*
 
@@ -44,8 +44,88 @@
   - [ ] Wire dashboard smoke tests into CI *(reuse browser automation harness)*
 
 - [ ] Add visualization for test results
-  - [ ] Historical trends
-  - [ ] Commit-by-commit comparison
+  - [x] Historical trends
+  - [x] Commit-by-commit comparison
+
+- [ ] External CI system integrations
+  - [x] Define provider abstraction layer (shared interface for pollers, webhooks, credential management)
+  - [x] Add CLI scaffolding for provider lifecycle (list/add/remove/sync)
+  - [ ] Implement shared job/status ingestion workflow (normalize runs → `test_runs` + `results` tables)
+  - [ ] Document security posture (secret storage, OAuth/token scopes) and fallback modes
+  - [ ] Build provider health dashboard panel + CLI diagnostics (`full-auto-ci providers status`)
+
+  #### GitHub Actions
+  - [ ] Support PAT / GitHub App auth flows with fine-grained scopes (repo, actions:read)
+  - [ ] Implement webhook handler for `workflow_job` + `check_suite` events → queue CIService tasks
+  - [ ] Add poller for scheduled sync of run metadata (GraphQL `workflowRuns` fallback)
+  - [ ] Surface re-run hooks (`workflow_dispatch`) from dashboard and CLI
+
+  #### GitLab CI
+  - [ ] Add personal-access-token + project access token credential handling
+  - [ ] Consume `Pipeline Hook` events; map statuses to internal enum
+  - [ ] Implement REST polling for pipelines/jobs when webhooks unavailable (self-hosted installs)
+  - [ ] Provide namespace/project selector in config + auto-pagination for large histories
+
+  #### Jenkins
+  - [ ] Support basic auth + API token + crumb issuer negotiation
+  - [ ] Add job discovery via `/api/json` and selectively subscribe to builds
+  - [ ] Stream console output + test reports (JUnit) into `results`
+  - [ ] Offer CLI command to trigger parameterized builds and watch completion
+
+  #### Bamboo CI
+  - [ ] Handle PAT and basic auth modes; document requirements for remote agent visibility
+  - [ ] Poll `/result` endpoints for plan status and artifacts
+  - [ ] Parse Bamboo test result API (JUnit/coverage) into dashboard summaries
+  - [ ] Add rate-limit aware backoff + alerting when Bamboo queue backlog detected
+
+  #### Additional Providers (stretch)
+  - [ ] Azure DevOps pipelines (use Service Principal + OAuth)
+  - [ ] CircleCI (personal token, pipeline webhook listener)
+  - [ ] Buildkite (graphQL pipeline events, artifact fetcher)
+  - [ ] Generic webhook adapter for unsupported providers
+
+  #### Architecture & Sequencing Notes
+  - **Unified provider interface**: introduce `BaseProvider` with hooks for `enqueue_from_webhook`, `sync_runs`, `trigger_run`, `validate_credentials`. Providers reside under `src/providers/<name>.py` with shared utilities in `src/providers/base.py`.
+  - **Background workers**: extend `CIService` monitor threads to include provider-specific pollers; reuse existing queue for normalized `TestTask` items.
+  - **Data model extensions**:
+   - Add `external_providers` table (`id`, `type`, `name`, `config`, `created_at`)
+   - Add `external_jobs` table to track remote run IDs → internal `test_runs`
+   - Add `provider_credentials` encrypted blob storage (integration with OS keyring or user-provided KMS)
+  - **Configuration UX**: new CLI commands: `provider add <type>`, `provider list`, `provider status`, `provider sync`. YAML config sections carry defaults per provider; secrets stored separately.
+  - **Security**: implement secret masking in logs, rotate tokens via reminders, support read-only mode for audit-first deployments. Document minimal scopes for each provider.
+  - **Telemetry/Alerts**: emit provider health metrics (last sync timestamp, error counts) into dashboard status card + optional Prometheus export in future phase.
+
+  #### Milestone Plan
+  1. **Foundations (Week 1)**
+    - Ship provider abstraction & schema migrations
+    - Implement provider registry + CLI scaffolding
+    - Add smoke tests for registry and configuration flows
+  2. **GitHub Actions (Weeks 2-3)**
+    - Webhook ingestion (checks/workflow job)
+    - REST/GraphQL polling fallback
+    - Dashboard surfacing of GitHub run metadata
+  3. **GitLab CI (Week 4)**
+    - Pipeline hook listener & manual sync command
+    - Support self-hosted namespaces
+  4. **Jenkins (Week 5)**
+    - API token auth, job discovery, build trigger support
+    - Console log + JUnit parser integration
+  5. **Bamboo CI (Week 6)**
+    - PAT auth + queue monitoring + test artifact fetch
+  6. **Stretch Providers (post-Week 6)**
+    - Azure DevOps → CircleCI → Buildkite → Generic adapter based on demand
+
+  #### Testing Strategy
+  - Add contract tests per provider using recorded fixtures/mocked HTTP responses (VCR.py or responses library)
+  - Simulate webhook payload replay in `tests/test_providers_<name>.py`
+  - Extend integration suite to validate provider sync populates dashboard + CLI outputs
+  - Introduce end-to-end smoke using lightweight dockerized Jenkins/Bamboo when CI resources permit (opt-in job)
+
+  #### Documentation Deliverables
+  - Provider setup guides in `docs/providers/<name>.md`
+  - Troubleshooting appendix (common HTTP errors, rate limits)
+  - Security checklist and sample token rotation playbooks
+  - Update `README.md` with quickstart matrix comparing provider capabilities
 
 ### UI Testing Strategy
 

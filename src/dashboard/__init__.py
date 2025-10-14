@@ -154,6 +154,64 @@ def _hydrate_test_runs(data_access, runs):
     return hydrated
 
 
+def _compute_duration(run: Dict[str, Any]) -> float | None:
+    started_at = run.get("started_at")
+    completed_at = run.get("completed_at")
+    if started_at is not None and completed_at is not None:
+        try:
+            return max(0.0, float(completed_at) - float(started_at))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _build_trend_points(runs: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    points: list[Dict[str, Any]] = []
+    ordered = sorted(
+        runs,
+        key=lambda item: (item.get("created_at") or 0, item.get("id") or 0),
+    )
+    for run in ordered:
+        commit = run.get("commit") or {}
+        label_source = commit.get("hash") or run.get("commit_hash") or "?"
+        label = str(label_source)[:7]
+        duration = _compute_duration(run)
+        points.append(
+            {
+                "label": label,
+                "status": run.get("status", "unknown"),
+                "duration": duration,
+                "created_at": run.get("created_at"),
+            }
+        )
+    return points
+
+
+def _build_commit_comparison(runs: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    comparison: list[Dict[str, Any]] = []
+    for run in runs:
+        commit = run.get("commit") or {}
+        label_source = commit.get("hash") or run.get("commit_hash") or "?"
+        tools = []
+        for result in run.get("results") or []:
+            tools.append(
+                {
+                    "tool": result.get("tool"),
+                    "status": result.get("status"),
+                }
+            )
+        comparison.append(
+            {
+                "commit_hash": str(label_source),
+                "status": run.get("status"),
+                "duration": _compute_duration(run),
+                "tools": tools,
+                "message": commit.get("message"),
+            }
+        )
+    return comparison
+
+
 def _build_repository_insights(service: CIService, data_access, repo_id: int):
     repository = service.get_repository(repo_id)
     if not repository:
@@ -163,11 +221,16 @@ def _build_repository_insights(service: CIService, data_access, repo_id: int):
     hydrated = _hydrate_test_runs(data_access, runs)
     summary = data_access.summarize_test_runs(repo_id)
 
+    trend_points = _build_trend_points(hydrated)
+    commit_comparison = _build_commit_comparison(hydrated[:10])
+
     return {
         "repository": repository,
         "test_runs": hydrated,
         "summary": summary,
         "last_run": hydrated[0] if hydrated else None,
+        "trend_points": trend_points,
+        "commit_comparison": commit_comparison,
     }
 
 

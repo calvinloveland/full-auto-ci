@@ -40,6 +40,133 @@
   <script src="https://unpkg.com/htmx.org@1.9.12"
     integrity="sha384-OeA4jZb9XiAxZg/PquPLUyaHtkobaN6D+PfYZ7R6pujISiFDUFxIr05oig3NbS1U"
     crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+    integrity="sha256-lQbZx7FKYyybesAFXe+jtkmyu8qIi+DGPdNwSvYiCl4=" crossorigin="anonymous"></script>
+  <script>
+    function initializeTrendCharts(root = document) {
+      if (!window.Chart) {
+        return;
+      }
+
+      const canvases = root.querySelectorAll("canvas[data-chart]");
+      canvases.forEach((canvas) => {
+        const { chart: chartData } = canvas.dataset;
+        if (!chartData) {
+          return;
+        }
+
+        let payload;
+        try {
+          payload = JSON.parse(chartData);
+        } catch (error) {
+          console.warn("Unable to parse chart dataset", error);
+          return;
+        }
+
+        if (!Array.isArray(payload) || payload.length === 0) {
+          return;
+        }
+
+        const labels = payload.map((point) => point.label ?? "");
+        const durations = payload.map((point) => {
+          const value = point.duration;
+          if (value === null || value === undefined) {
+            return null;
+          }
+          const numeric = Number.parseFloat(value);
+          return Number.isFinite(numeric) ? numeric : null;
+        });
+
+        const statusColors = payload.map((point) => {
+          const status = String(point.status || "").toLowerCase();
+          switch (status) {
+            case "success":
+            case "completed":
+              return "rgba(74, 222, 128, 0.8)";
+            case "error":
+            case "failed":
+              return "rgba(248, 113, 113, 0.8)";
+            case "running":
+              return "rgba(56, 189, 248, 0.8)";
+            default:
+              return "rgba(148, 163, 184, 0.6)";
+          }
+        });
+
+        const dataPoints = durations.map((value, index) => ({
+          x: labels[index],
+          y: value === null ? 0 : value,
+          status: payload[index].status,
+        }));
+
+        if (canvas._chartInstance) {
+          canvas._chartInstance.destroy();
+        }
+
+        const ctx = canvas.getContext("2d");
+        canvas._chartInstance = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "Run duration (s)",
+                data: dataPoints.map((point) => point.y),
+                tension: 0.3,
+                borderColor: "rgba(56, 189, 248, 0.7)",
+                backgroundColor: statusColors,
+                fill: false,
+                pointRadius: 5,
+                pointHoverRadius: 7,
+              },
+            ],
+          },
+          options: {
+            scales: {
+              y: {
+                title: {
+                  display: true,
+                  text: "Seconds",
+                },
+                ticks: {
+                  precision: 0,
+                  beginAtZero: true,
+                },
+              },
+              x: {
+                title: {
+                  display: true,
+                  text: "Commit",
+                },
+              },
+            },
+            plugins: {
+              tooltip: {
+                callbacks: {
+                  label(context) {
+                    const status = payload[context.dataIndex]?.status ?? "";
+                    const duration = durations[context.dataIndex];
+                    const durationLabel =
+                      duration === null ? "Duration unavailable" : `${duration.toFixed(2)}s`;
+                    return `${status}: ${durationLabel}`;
+                  },
+                },
+              },
+              legend: {
+                display: true,
+              },
+            },
+          },
+        });
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => initializeTrendCharts());
+    document.addEventListener("htmx:afterSwap", (event) => {
+      initializeTrendCharts(event.target);
+    });
+  </script>
+  {% block scripts %}{% endblock %}
 </body>
 
 </html>

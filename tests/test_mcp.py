@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -143,6 +144,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+async def _open_connection_with_retry(host: str, port: int, timeout: float = 2.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last_error: Exception | None = None
+    while True:
+        try:
+            return await asyncio.open_connection(host, port)
+        except (ConnectionRefusedError, OSError) as exc:
+            last_error = exc
+            if loop.time() >= deadline:
+                raise AssertionError(
+                    f"Timed out waiting for MCP server on {host}:{port}"
+                ) from last_error
+            await asyncio.sleep(0.05)
+
+
 def test_handshake_announces_capabilities(dummy_service):
     server = MCPServer(dummy_service)
     response = _run(
@@ -222,6 +239,59 @@ def test_initialize_defaults_missing_client_fields(dummy_service):
     result = response["result"]
     assert result["protocolVersion"] == "2025-06-18"
     assert result["serverInfo"]["name"] == "full-auto-ci"
+
+
+def test_tcp_server_emits_initialize_response(dummy_service):
+    async def scenario():
+        server = MCPServer(dummy_service)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            host, port = probe.getsockname()
+
+        shutdown_event = asyncio.Event()
+        serve_task = asyncio.create_task(
+            server.serve_tcp(host=host, port=port, shutdown_event=shutdown_event)
+        )
+
+        try:
+            reader, writer = await _open_connection_with_retry(host, port)
+            try:
+                message = {
+                    "jsonrpc": "2.0",
+                    "id": 100,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "clientInfo": {
+                            "name": "test-client",
+                            "version": "0.0",
+                        },
+                        "capabilities": {},
+                    },
+                }
+                payload = json.dumps(message) + "\n"
+                writer.write(payload.encode("utf-8"))
+                await writer.drain()
+
+                raw_response = await reader.readline()
+                assert raw_response, "Server did not respond to initialize request"
+                response = json.loads(raw_response.decode("utf-8"))
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            shutdown_event.set()
+            await serve_task
+
+        assert response["id"] == 100
+        result = response["result"]
+        assert result["serverInfo"]["name"] == "full-auto-ci"
+        assert result["serverInfo"]["version"] == PACKAGE_VERSION
+        assert result["protocolVersion"] in MCPServer._SUPPORTED_PROTOCOL_VERSIONS
+        assert "instructions" in result and "Full Auto CI" in result["instructions"]
+
+    _run(scenario())
 
 
 def test_list_repositories_returns_service_data(dummy_service):

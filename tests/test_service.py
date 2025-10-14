@@ -279,6 +279,40 @@ class TestCIService(unittest.TestCase):
         self.assertIn("coverage", message)
         self.assertIn("pytest", message)
 
+    def test_add_provider_creates_record(self):
+        provider = self.service.add_provider(
+            "github",
+            "GitHub Demo",
+            config={"token": "abc", "owner": "me", "repository": "demo"},
+        )
+        self.assertEqual(provider["name"], "GitHub Demo")
+        self.assertGreater(provider["id"], 0)
+
+        providers = self.service.list_providers()
+        self.assertEqual(len(providers), 1)
+        self.assertEqual(providers[0]["type"], "github")
+        self.assertEqual(providers[0]["name"], "GitHub Demo")
+
+    def test_remove_provider(self):
+        provider = self.service.add_provider(
+            "github",
+            "GitHub Demo",
+            config={"token": "abc", "owner": "me", "repository": "demo"},
+        )
+        providers = self.service.list_providers()
+        self.assertEqual(len(providers), 1)
+
+        removed = self.service.remove_provider(provider["id"])
+        self.assertTrue(removed)
+        self.assertEqual(self.service.list_providers(), [])
+
+    def test_get_provider_types(self):
+        types = self.service.get_provider_types()
+        # At least github, gitlab, jenkins, bamboo should be present
+        registered = {entry["type"] for entry in types}
+        self.assertIn("github", registered)
+        self.assertIn("gitlab", registered)
+
     def test_coerce_bool_variants(self):
         self.assertTrue(
             self.service._coerce_bool(True)

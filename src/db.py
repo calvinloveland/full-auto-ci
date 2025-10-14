@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -115,6 +116,35 @@ class DataAccess:
                 """
             )
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS external_providers (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    config TEXT,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS external_jobs (
+                    id INTEGER PRIMARY KEY,
+                    provider_id INTEGER NOT NULL,
+                    external_id TEXT NOT NULL,
+                    repository_id INTEGER,
+                    test_run_id INTEGER,
+                    status TEXT,
+                    payload TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER,
+                    FOREIGN KEY (provider_id) REFERENCES external_providers (id)
+                )
+                """
+            )
+
             # Backfill columns that might be missing in older installations
             added_status = self._ensure_column(
                 cursor, "repositories", "status", "TEXT DEFAULT 'active'"
@@ -157,6 +187,20 @@ class DataAccess:
                 """
             )
 
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_external_jobs_provider_external
+                ON external_jobs(provider_id, external_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_external_providers_type
+                ON external_providers(type)
+                """
+            )
+
     @staticmethod
     def _ensure_column(
         cursor: sqlite3.Cursor, table: str, column: str, definition_suffix: str
@@ -171,6 +215,24 @@ class DataAccess:
             return False
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition_suffix}")
         return True
+
+    @staticmethod
+    def _serialize_json(value: Optional[Dict[str, Any]]) -> str:
+        if value is None:
+            return "{}"
+        return json.dumps(value, sort_keys=True)
+
+    @staticmethod
+    def _deserialize_json(value: Optional[str]) -> Dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            decoded = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+        return {}
 
     def create_repository(self, name: str, url: str, branch: str) -> int:
         """Insert a repository record and return its identifier."""
@@ -247,6 +309,110 @@ class DataAccess:
                 "UPDATE repositories SET last_check = ? WHERE id = ?",
                 (timestamp, repo_id),
             )
+
+    def create_external_provider(
+        self, name: str, provider_type: str, config: Optional[Dict[str, Any]] = None
+    ) -> int:
+        created_at = int(time.time())
+        config_json = self._serialize_json(config)
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO external_providers (name, type, config, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name, provider_type, config_json, created_at),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_external_providers(self) -> List[Dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, type, config, created_at
+                FROM external_providers
+                ORDER BY id ASC
+                """
+            )
+            rows = cursor.fetchall()
+
+        providers: List[Dict[str, Any]] = []
+        for row in rows:
+            providers.append(
+                {
+                    "id": int(row[0]),
+                    "name": row[1],
+                    "type": row[2],
+                    "config": self._deserialize_json(row[3]),
+                    "created_at": row[4],
+                }
+            )
+        return providers
+
+    def fetch_external_provider(self, provider_id: int) -> Optional[Dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, type, config, created_at
+                FROM external_providers
+                WHERE id = ?
+                """,
+                (provider_id,),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "id": int(row[0]),
+            "name": row[1],
+            "type": row[2],
+            "config": self._deserialize_json(row[3]),
+            "created_at": row[4],
+        }
+
+    def update_external_provider(
+        self,
+        provider_id: int,
+        *,
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        assignments: List[str] = []
+        params: List[Any] = []
+
+        if name is not None:
+            assignments.append("name = ?")
+            params.append(name)
+        if config is not None:
+            assignments.append("config = ?")
+            params.append(self._serialize_json(config))
+
+        if not assignments:
+            return False
+
+        params.append(provider_id)
+
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE external_providers SET {', '.join(assignments)} WHERE id = ?",
+                tuple(params),
+            )
+            return cursor.rowcount > 0
+
+    def delete_external_provider(self, provider_id: int) -> bool:
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM external_providers WHERE id = ?",
+                (provider_id,),
+            )
+            return cursor.rowcount > 0
 
     def get_commit_id(self, repo_id: int, commit_hash: str) -> Optional[int]:
         """Return the primary key for ``commit_hash`` within ``repo_id``."""

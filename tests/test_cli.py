@@ -64,6 +64,25 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(args.command, "user")
         self.assertEqual(args.user_command, "list")
 
+        args = self.cli.parse_args(["provider", "list"])
+        self.assertEqual(args.command, "provider")
+        self.assertEqual(args.provider_command, "list")
+
+        args = self.cli.parse_args(
+            [
+                "provider",
+                "add",
+                "github",
+                "GitHub Actions",
+                "--config",
+                json.dumps({"token": "x", "owner": "demo", "repository": "repo"}),
+            ]
+        )
+        self.assertEqual(args.command, "provider")
+        self.assertEqual(args.provider_command, "add")
+        self.assertEqual(args.type, "github")
+        self.assertEqual(args.name, "GitHub Actions")
+
     @patch("src.cli.CLI._handle_service_command")
     def test_run_service_command(self, mock_handle):
         """Test running service commands."""
@@ -221,6 +240,16 @@ class TestCLI(unittest.TestCase):
         mock_handle.assert_called_once()
         self.assertEqual(exit_code, 0)
 
+    @patch("src.cli.CLI._handle_provider_command")
+    def test_run_provider_command(self, mock_handle):
+        """Provider top-level command routes to handler."""
+        mock_handle.return_value = 0
+
+        exit_code = self.cli.run(["provider", "list"])
+
+        mock_handle.assert_called_once()
+        self.assertEqual(exit_code, 0)
+
     @patch("builtins.print")
     def test_config_set_updates_value(self, mock_print):
         """Setting a config value should persist to Config."""
@@ -301,6 +330,90 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(exit_code_failure, 1)
         mock_print.assert_any_call("User 'alice' removed")
         mock_print.assert_any_call("Error: User 'bob' not found")
+
+    @patch("builtins.print")
+    def test_provider_list_empty(self, mock_print):
+        self.cli.service.list_providers = lambda: []
+
+        exit_code = self.cli.run(["provider", "list"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("No external providers configured.")
+
+    @patch("builtins.print")
+    def test_provider_types_outputs(self, mock_print):
+        self.cli.service.get_provider_types = lambda: [
+            {"type": "github", "display_name": "GitHub Actions", "description": ""}
+        ]
+
+        exit_code = self.cli.run(["provider", "types"])
+
+        self.assertEqual(exit_code, 0)
+        lines = [
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        ]
+        self.assertTrue(any("github" in line for line in lines))
+
+    @patch("builtins.print")
+    def test_provider_add_success(self, mock_print):
+        self.cli.service.add_provider = lambda provider_type, name, config=None: {
+            "id": 3,
+            "name": name,
+            "type": provider_type,
+        }
+
+        payload = json.dumps({"token": "abc", "owner": "me", "repository": "demo"})
+        exit_code = self.cli.run(
+            ["provider", "add", "github", "Demo", "--config", payload]
+        )
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("Provider 'Demo' registered with id 3")
+
+    @patch("builtins.print")
+    def test_provider_add_invalid_json(self, mock_print):
+        exit_code = self.cli.run(
+            ["provider", "add", "github", "Demo", "--config", "not-json"]
+        )
+
+        self.assertEqual(exit_code, 1)
+        mock_print.assert_any_call(
+            "Error: Invalid JSON payload: Expecting value: line 1 column 1 (char 0)"
+        )
+
+    @patch("builtins.print")
+    def test_provider_remove(self, mock_print):
+        self.cli.service.remove_provider = lambda provider_id: provider_id == 5
+
+        exit_code_ok = self.cli.run(["provider", "remove", "5"])
+        exit_code_missing = self.cli.run(["provider", "remove", "2"])
+
+        self.assertEqual(exit_code_ok, 0)
+        self.assertEqual(exit_code_missing, 1)
+        mock_print.assert_any_call("Provider 5 removed")
+        mock_print.assert_any_call("Error: Provider 2 not found")
+
+    @patch("builtins.print")
+    def test_provider_sync(self, mock_print):
+        self.cli.service.sync_provider = lambda provider_id, limit=50: [{"id": "abc"}]
+
+        exit_code = self.cli.run(["provider", "sync", "5"])
+
+        self.assertEqual(exit_code, 0)
+        mock_print.assert_any_call("Synced provider 5; fetched 1 run(s)")
+
+    @patch("builtins.print")
+    def test_provider_sync_missing(self, mock_print):
+        def raise_key_error(_provider_id, limit=50):
+            raise KeyError("not found")
+
+        self.cli.service.sync_provider = raise_key_error
+
+        exit_code = self.cli.run(["provider", "sync", "1"])
+
+        self.assertEqual(exit_code, 1)
+        mock_print.assert_any_call("Error: Provider 1 not found")
 
     @patch("src.cli.webbrowser.open", return_value=True)
     @patch("builtins.print")

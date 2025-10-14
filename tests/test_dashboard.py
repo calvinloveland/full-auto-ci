@@ -104,6 +104,9 @@ def test_repository_insights_partial(client):
     assert "Recent Test Runs" in body
     assert "abc1234" in body
     assert "2 passed" in body
+    assert "Historical Trend" in body
+    assert "Commit Comparison" in body
+    assert "data-chart" in body
 
 
 def test_dashboard_main_runs(monkeypatch):

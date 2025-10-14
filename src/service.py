@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import Config
 from .db import DataAccess
 from .git import GitTracker
+from .providers import BaseProvider, ProviderConfigError
+from .providers import registry as provider_registry
 from .tools import Coverage, Pylint, ToolRunner
 
 # Configure logging
@@ -70,6 +72,9 @@ class CIService:
         )
         self.data.initialize_schema()
         self._bootstrap_dogfood_repository()
+        self.provider_registry = provider_registry
+        self._providers: Dict[int, BaseProvider] = {}
+        self._load_providers()
         logger.info("CI Service initialized")
 
     @property
@@ -121,6 +126,133 @@ class CIService:
         original = self._component_overrides.pop(name, None)
         if original is not None:
             setattr(self._components, name, original)
+
+    def _instantiate_provider(self, record: Dict[str, Any]) -> Optional[BaseProvider]:
+        provider_type = record.get("type") or ""
+        try:
+            provider = self.provider_registry.create(provider_type, self, record)
+        except KeyError:
+            logger.error(
+                "Unable to instantiate provider %s: type '%s' is not registered",
+                record.get("id"),
+                provider_type,
+            )
+            return None
+        except ProviderConfigError as exc:
+            logger.error(
+                "Provider %s configuration invalid: %s",
+                record.get("id"),
+                exc,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception(
+                "Unexpected error loading provider %s: %s",
+                record.get("id"),
+                exc,
+            )
+            return None
+        return provider
+
+    def _load_providers(self) -> None:
+        self._providers.clear()
+        for record in self.data.list_external_providers():
+            provider = self._instantiate_provider(record)
+            if provider is None:
+                continue
+            self._providers[provider.provider_id] = provider
+
+    # Provider management -----------------------------------------------------
+    def list_providers(self) -> List[Dict[str, Any]]:
+        providers: List[Dict[str, Any]] = []
+        for record in self.data.list_external_providers():
+            descriptor: Dict[str, Any] = {
+                "id": record["id"],
+                "name": record["name"],
+                "type": record["type"],
+                "created_at": record.get("created_at"),
+                "config": record.get("config") or {},
+            }
+
+            instance = self._providers.get(record["id"])
+            if instance is not None:
+                descriptor.update(
+                    {
+                        "display_name": instance.display_name,
+                        "description": instance.description,
+                    }
+                )
+            else:
+                try:
+                    provider_cls = self.provider_registry.get(record["type"])
+                except KeyError:
+                    provider_cls = None
+                if provider_cls is not None:
+                    descriptor.setdefault(
+                        "display_name",
+                        getattr(provider_cls, "display_name", record["type"]),
+                    )
+                    descriptor.setdefault(
+                        "description",
+                        getattr(provider_cls, "description", ""),
+                    )
+            providers.append(descriptor)
+        return providers
+
+    def get_provider_types(self) -> List[Dict[str, Any]]:
+        return list(self.provider_registry.available_types())
+
+    def add_provider(
+        self,
+        provider_type: str,
+        name: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        provider_cls = self.provider_registry.get(provider_type)
+        config_dict = dict(config or {})
+        errors = list(provider_cls.validate_static_config(config_dict))
+        if errors:
+            raise ProviderConfigError("; ".join(errors))
+
+        provider_id = self.data.create_external_provider(
+            name, provider_type, config_dict
+        )
+        record = self.data.fetch_external_provider(provider_id)
+        if not record:
+            raise RuntimeError("Failed to load provider after creation")
+
+        provider = self._instantiate_provider(record)
+        if provider is not None:
+            self._providers[provider_id] = provider
+            return provider.to_dict()
+
+        return {
+            "id": provider_id,
+            "name": name,
+            "type": provider_type,
+            "config": config_dict,
+        }
+
+    def remove_provider(self, provider_id: int) -> bool:
+        removed = self.data.delete_external_provider(provider_id)
+        if removed:
+            self._providers.pop(provider_id, None)
+        return removed
+
+    def sync_provider(
+        self, provider_id: int, *, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        provider = self._providers.get(provider_id)
+        if provider is None:
+            record = self.data.fetch_external_provider(provider_id)
+            if record is None:
+                raise KeyError(f"Provider {provider_id} not found")
+            provider = self._instantiate_provider(record)
+            if provider is None:
+                raise RuntimeError(f"Provider {provider_id} could not be loaded")
+            self._providers[provider_id] = provider
+        return provider.sync_runs(limit=limit)
 
     @property
     def tool_runner(self) -> ToolRunner:

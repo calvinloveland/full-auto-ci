@@ -25,6 +25,70 @@
 </div>
 {% endif %}
 
+{% if trend_points %}
+<section class="section-card">
+    <header class="section-subheader">
+        <h3>Historical Trend</h3>
+    </header>
+    <div class="chart-card">
+        <canvas id="run-trend-chart" width="640" height="280" data-chart='{{ trend_points | tojson }}'></canvas>
+    </div>
+    <p class="chart-hint">Durations use the difference between test start and completion timestamps.</p>
+</section>
+{% endif %}
+
+{% if commit_comparison %}
+<section class="section-card">
+    <header class="section-subheader">
+        <h3>Commit Comparison</h3>
+    </header>
+    <div class="comparison-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>Commit</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Tools</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in commit_comparison %}
+                <tr>
+                    <td>
+                        <code>{{ row.commit_hash[:7] }}</code>
+                        {% if row.message %}<div class="comparison-message">{{ row.message }}</div>{% endif %}
+                    </td>
+                    <td>
+                        <span class="status-pill {{ row.status | status_class }}">{{ row.status }}</span>
+                    </td>
+                    <td>
+                        {% if row.duration is not none %}
+                        {{ '%.2f'|format(row.duration) }}s
+                        {% else %}
+                        —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if row.tools %}
+                        <ul class="tool-status-list">
+                            {% for tool in row.tools %}
+                            <li><span>{{ tool.tool }}</span> <span
+                                    class="status-pill {{ tool.status | status_class }}">{{ tool.status }}</span></li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <span class="muted">no tool results</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
 <section class="section">
     <header class="section-subheader">
         <h3>Recent Test Runs</h3>
