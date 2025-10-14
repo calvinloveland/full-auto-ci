@@ -438,6 +438,100 @@ body {
   border-radius: 6px;
 }
 
+.pytest-summary {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.pytest-collected {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.pytest-counts {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.pytest-count {
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  background: rgba(148, 163, 184, 0.14);
+  font-size: 0.75rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.pytest-count-number {
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.pytest-count-label {
+  text-transform: capitalize;
+  color: var(--muted);
+}
+
+.pytest-count--failed,
+.pytest-count--error,
+.pytest-count--errors {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+
+.pytest-count--passed {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--success);
+}
+
+.pytest-count--skipped,
+.pytest-count--xfailed,
+.pytest-count--xpassed {
+  background: rgba(250, 204, 21, 0.15);
+  color: var(--warning);
+}
+
+.coverage-files {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.coverage-files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  font-size: 0.8rem;
+}
+
+.coverage-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverage-file-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.pylint-issues {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .error-box {
   margin-top: 1rem;
   border: 1px solid rgba(248, 113, 113, 0.35);

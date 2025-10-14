@@ -12,12 +12,12 @@ import socket
 import sys
 import time
 import webbrowser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import __version__ as PACKAGE_VERSION
 from .dashboard import create_app
 from .mcp import MCPServer
 from .service import CIService
-from . import __version__ as PACKAGE_VERSION
 
 # Configure logging
 logging.basicConfig(
@@ -499,10 +499,17 @@ class CLI:
             print("No repositories configured")
             return 0
 
-        print("ID | Name | URL | Branch")
-        print("-" * 50)
-        for repo in repos:
-            print(f"{repo['id']} | {repo['name']} | {repo['url']} | {repo['branch']}")
+        headers = ("ID", "Name", "Branch", "URL")
+        rows: List[Sequence[str]] = [
+            (str(repo["id"]), repo["name"], repo["branch"], repo["url"])
+            for repo in repos
+        ]
+        self._print_table(
+            headers,
+            rows,
+            title="Repositories",
+            alignments=("right", "left", "left", "left"),
+        )
         return 0
 
     def _repo_add(self, args: argparse.Namespace) -> int:
@@ -541,12 +548,44 @@ class CLI:
 
     def _test_run(self, args: argparse.Namespace) -> int:
         results = self.service.run_tests(args.repo_id, args.commit)
-        print("Test results:")
-        print(f"Overall status: {results['status']}")
-        for warning in results.get("warnings", []):
-            print(f"Warning: {warning}")
-        for tool, result in results["tools"].items():
-            print(f"- {tool}: {result['status']}")
+
+        title = f"Test results for repository {args.repo_id}"
+        subtitle = f"Commit: {args.commit}"
+        self._print_heading(title)
+        print(subtitle)
+
+        overall = self._format_status(results.get("status"))
+        print(f"Overall: {overall}")
+
+        warnings = results.get("warnings", []) or []
+        for warning in warnings:
+            print(f"[WARN] {warning}")
+
+        tool_rows: List[Sequence[str]] = []
+        for tool, result in results.get("tools", {}).items():
+            status = self._format_status(result.get("status"))
+            duration = self._format_duration(result.get("duration"))
+            summary = self._summarize_tool_output(
+                json.dumps(result), result.get("status")
+            )
+            tool_rows.append(
+                (
+                    tool,
+                    status,
+                    duration,
+                    summary or "—",
+                )
+            )
+
+        if tool_rows:
+            self._print_table(
+                ("Tool", "Status", "Duration", "Details"),
+                tool_rows,
+                title="Tool results",
+                alignments=("left", "left", "right", "left"),
+            )
+        else:
+            print("No tool results produced")
         return 0
 
     def _test_results(self, args: argparse.Namespace) -> int:
@@ -563,40 +602,63 @@ class CLI:
                 print(f"No test runs found for repository {args.repo_id}.")
             return 0
 
-        print(f"Test runs for repository {args.repo_id}")
+        self._print_heading(f"Test runs for repository {args.repo_id}")
         if args.commit:
             print(f"Filtered by commit: {args.commit}")
 
-        for run in runs:
-            print(
-                f"Run {run['id']} | Commit: {run['commit_hash']} | Status: {run['status']}"
-            )
+        for index, run in enumerate(runs, start=1):
+            if index > 1:
+                print("")
+
+            status_label = self._format_status(run.get("status"))
+            heading = f"Run {run['id']} • {status_label}"
+            self._print_subheading(heading)
+
+            commit_hash = run.get("commit_hash", "-")
             created = run.get("created_at", "-")
             started = run.get("started_at") or "-"
             completed = run.get("completed_at") or "-"
-            print(f"  Created: {created} | Started: {started} | Completed: {completed}")
+            message = (run.get("commit") or {}).get("message")
 
-            commit = run.get("commit") or {}
-            message = commit.get("message")
+            meta_rows = [
+                ("Commit", commit_hash),
+                ("Created", created),
+                ("Started", started),
+                ("Completed", completed),
+            ]
             if message:
-                print(f"  Message: {message}")
+                meta_rows.append(("Message", message))
+
+            self._print_key_values(meta_rows, indent=2)
 
             if run.get("error"):
-                print(f"  Error: {run['error']}")
+                print(f"  [ERROR] {run['error']}")
 
             results = run.get("results") or []
-            if not results:
-                print("  (no tool results persisted)")
-                continue
+            if results:
+                tool_rows = []
+                for result in results:
+                    tool = result.get("tool", "unknown")
+                    status = self._format_status(result.get("status"))
+                    summary = self._summarize_tool_output(
+                        result.get("output"), result.get("status")
+                    )
+                    tool_rows.append(
+                        (
+                            tool,
+                            status,
+                            summary or "—",
+                        )
+                    )
 
-            for result in results:
-                tool = result.get("tool", "unknown")
-                status = result.get("status", "unknown")
-                summary = self._summarize_tool_output(result.get("output"), status)
-                line = f"  - {tool}: {status}"
-                if summary:
-                    line += f" ({summary})"
-                print(line)
+                self._print_table(
+                    ("Tool", "Status", "Details"),
+                    tool_rows,
+                    title="  Tool results",
+                    alignments=("left", "left", "left"),
+                )
+            else:
+                print("  No tool results persisted")
 
         return 0
 
@@ -674,13 +736,20 @@ class CLI:
         if not users:
             print("No users found")
             return 0
-        print("ID | Username | Role | Created")
-        print("-" * 60)
-        for user in users:
-            created = user.get("created_at") or ""
-            print(
-                f"{user['id']} | {user['username']} | {user.get('role', 'user')} | {created}"
+
+        headers = ("ID", "Username", "Role", "Created")
+        rows = [
+            (
+                str(user.get("id", "")),
+                user.get("username", ""),
+                user.get("role", "user"),
+                user.get("created_at", ""),
             )
+            for user in users
+        ]
+        self._print_table(
+            headers, rows, title="Users", alignments=("right", "left", "left", "left")
+        )
         return 0
 
     def _user_add(self, args: argparse.Namespace) -> int:
@@ -741,6 +810,107 @@ class CLI:
             return int(raw)
         except ValueError:
             return None
+
+    @staticmethod
+    def _format_duration(value: Optional[Any]) -> str:
+        if value in (None, ""):
+            return "—"
+
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        return f"{numeric:.2f}s"
+
+    @staticmethod
+    def _format_status(status: Optional[str]) -> str:
+        normalized = (status or "").strip().lower()
+        mapping = {
+            "success": "✔ success",
+            "completed": "✔ completed",
+            "error": "✖ error",
+            "failed": "✖ failed",
+            "running": "… running",
+            "pending": "… pending",
+            "queued": "… queued",
+        }
+        return mapping.get(normalized, status or "unknown")
+
+    @staticmethod
+    def _print_heading(text: str):
+        title = text.strip()
+        underline = "=" * len(title)
+        print(title)
+        print(underline)
+
+    @staticmethod
+    def _print_subheading(text: str):
+        label = text.strip()
+        print(label)
+        print("-" * len(label))
+
+    @staticmethod
+    def _print_key_values(pairs: Sequence[Tuple[str, Any]], *, indent: int = 0) -> None:
+        if not pairs:
+            return
+
+        width = max(len(label) for label, _ in pairs)
+        prefix = " " * max(indent, 0)
+        for label, value in pairs:
+            value_text = str(value) if value is not None else ""
+            print(f"{prefix}{label.ljust(width)} : {value_text}")
+
+    def _print_table(
+        self,
+        headers: Sequence[str],
+        rows: Iterable[Sequence[Any]],
+        *,
+        title: Optional[str] = None,
+        alignments: Optional[Sequence[str]] = None,
+    ) -> None:
+        rendered_rows = [
+            tuple("" if cell is None else str(cell) for cell in row) for row in rows
+        ]
+        column_count = len(headers)
+        if alignments is None:
+            alignments = tuple("left" for _ in range(column_count))
+        else:
+            alignments = tuple((alignment or "left") for alignment in alignments)
+
+        widths = [len(str(header)) for header in headers]
+        for row in rendered_rows:
+            for index, cell in enumerate(row):
+                widths[index] = max(widths[index], len(cell))
+
+        horizontal = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+        header_sep = "+" + "+".join("=" * (width + 2) for width in widths) + "+"
+
+        def format_row(row_values: Sequence[str]) -> str:
+            cells: List[str] = []
+            for idx, raw_value in enumerate(row_values):
+                align = alignments[idx] if idx < len(alignments) else "left"
+                if align == "right":
+                    cell = raw_value.rjust(widths[idx])
+                elif align == "center":
+                    cell = raw_value.center(widths[idx])
+                else:
+                    cell = raw_value.ljust(widths[idx])
+                cells.append(f" {cell} ")
+            return "|" + "|".join(cells) + "|"
+
+        output_lines: List[str] = []
+        if title:
+            output_lines.append(title)
+        output_lines.append(horizontal)
+        output_lines.append(format_row(tuple(str(header) for header in headers)))
+        output_lines.append(header_sep)
+        for row in rendered_rows:
+            output_lines.append(format_row(row))
+        output_lines.append(horizontal)
+
+        for line in output_lines:
+            print(line)
 
     @staticmethod
     def _summarize_tool_output(
@@ -969,6 +1139,7 @@ class CLI:
             )
 
         return level
+
 
 def main() -> int:
     """Entry point for the CLI."""

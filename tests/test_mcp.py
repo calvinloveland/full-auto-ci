@@ -120,7 +120,10 @@ class DummyService:
     def remove_repository(self, repo_id: int) -> bool:
         if not self.repositories:
             return False
-        index = next((i for i, repo in enumerate(self.repositories) if repo["id"] == repo_id), None)
+        index = next(
+            (i for i, repo in enumerate(self.repositories) if repo["id"] == repo_id),
+            None,
+        )
         if index is None:
             return False
         self.repositories.pop(index)

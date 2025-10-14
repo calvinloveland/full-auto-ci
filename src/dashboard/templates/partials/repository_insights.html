@@ -76,14 +76,121 @@
                         <span class="status-pill {{ result.status | status_class }}">{{ result.status }}</span>
                     </header>
                     <div class="result-body">
-                        {% if result.duration %}
-                        <p><strong>Duration:</strong> {{ '%.2f'|format(result.duration) }}s</p>
+                        {% set payload = result.data %}
+                        {% set duration_value = None %}
+                        {% if payload and payload.duration is not none %}
+                        {% set duration_value = payload.duration %}
+                        {% elif result.duration %}
+                        {% set duration_value = result.duration %}
                         {% endif %}
-                        {% if result.output %}
+
+                        {% if duration_value %}
+                        <p><strong>Duration:</strong> {{ '%.2f'|format(duration_value|float) }}s</p>
+                        {% endif %}
+
+                        {% if result.tool == 'coverage' and payload %}
+                        {% if payload.percentage is not none %}
+                        <p><strong>Total coverage:</strong> {{ '%.2f'|format(payload.percentage|float) }}%</p>
+                        {% endif %}
+                        {% if payload.pytest_summary %}
+                        {% set summary = payload.pytest_summary %}
+                        {% if summary.summary %}
+                        <p><strong>Pytest:</strong> {{ summary.summary }}</p>
+                        {% endif %}
+                        {% if summary.counts %}
+                        <ul class="pytest-counts">
+                            {% for item in summary.counts %}
+                            <li class="pytest-count pytest-count--{{ item.label }}">
+                                <span class="pytest-count-number">{{ item.count }}</span>
+                                <span class="pytest-count-label">{{ item.label | replace('_', ' ') }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                        {% endif %}
+                        {% if payload.files %}
+                        <details>
+                            <summary>File coverage breakdown</summary>
+                            <ul class="coverage-files">
+                                {% for file_cov in payload.files %}
+                                <li>
+                                    <span class="coverage-file-name">{{ file_cov.filename }}</span>
+                                    <span class="coverage-file-value">{{ '%.1f'|format(file_cov.coverage|float)
+                                        }}%</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </details>
+                        {% endif %}
+                        {% if payload.error %}
+                        <div class="error-box">
+                            <strong>Error:</strong>
+                            <pre>{{ payload.error }}</pre>
+                        </div>
+                        {% endif %}
+                        {% elif result.tool == 'pytest' and payload %}
+                        <div class="pytest-summary">
+                            {% if payload.summary %}
+                            <p><strong>Summary:</strong> {{ payload.summary }}</p>
+                            {% endif %}
+                            {% if payload.collected is not none %}
+                            <p class="pytest-collected">Collected {{ payload.collected }} test{% if payload.collected !=
+                                1 %}s{% endif %}</p>
+                            {% endif %}
+                            {% if payload.counts %}
+                            <ul class="pytest-counts">
+                                {% for item in payload.counts %}
+                                <li class="pytest-count pytest-count--{{ item.label }}">
+                                    <span class="pytest-count-number">{{ item.count }}</span>
+                                    <span class="pytest-count-label">{{ item.label | replace('_', ' ') }}</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                            {% endif %}
+                        </div>
+                        {% if payload.raw_output %}
+                        <details>
+                            <summary>Full pytest log</summary>
+                            <pre>{{ payload.raw_output }}</pre>
+                        </details>
+                        {% endif %}
+                        {% elif result.tool == 'pylint' and payload %}
+                        {% if payload.score is not none %}
+                        <p><strong>Score:</strong> {{ '%.2f'|format(payload.score|float) }}/10</p>
+                        {% endif %}
+                        {% if payload.issues %}
+                        <ul class="pylint-issues">
+                            {% for issue_type, count in payload.issues.items() %}
+                            <li>{{ issue_type | capitalize }}: {{ count }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                        {% if payload.error %}
+                        <div class="error-box">
+                            <strong>Error:</strong>
+                            <pre>{{ payload.error }}</pre>
+                        </div>
+                        {% endif %}
+                        {% endif %}
+
+                        {% if result.tool != 'pytest' and payload and payload.raw_output %}
+                        <details>
+                            <summary>Output</summary>
+                            <pre>{{ payload.raw_output }}</pre>
+                        </details>
+                        {% elif result.output %}
+                        {% set show_raw = true %}
+                        {% if payload %}
+                        {% if payload.raw_output %}
+                        {% set show_raw = false %}
+                        {% endif %}
+                        {% endif %}
+                        {% if show_raw %}
                         <details>
                             <summary>Output</summary>
                             <pre>{{ result.output }}</pre>
                         </details>
+                        {% endif %}
                         {% endif %}
                     </div>
                 </div>

@@ -294,7 +294,9 @@ class MCPServer:
 
         repo_id = params.get("repositoryId")
         if not isinstance(repo_id, int) or repo_id <= 0:
-            raise MCPError(code=-32602, message="repositoryId must be a positive integer")
+            raise MCPError(
+                code=-32602, message="repositoryId must be a positive integer"
+            )
 
         success = self.service.remove_repository(repo_id)
         if not success:
@@ -312,7 +314,9 @@ class MCPServer:
         repo_id = params.get("repositoryId")
         commit_hash = params.get("commit")
         if not isinstance(repo_id, int) or repo_id <= 0:
-            raise MCPError(code=-32602, message="repositoryId must be a positive integer")
+            raise MCPError(
+                code=-32602, message="repositoryId must be a positive integer"
+            )
         if not isinstance(commit_hash, str) or not commit_hash.strip():
             raise MCPError(code=-32602, message="commit must be a non-empty string")
 
@@ -389,9 +393,7 @@ class MCPServer:
             await server.wait_closed()
             logger.info("MCP server stopped")
 
-    async def serve_stdio(
-        self, *, shutdown_event: asyncio.Event | None = None
-    ) -> None:
+    async def serve_stdio(self, *, shutdown_event: asyncio.Event | None = None) -> None:
         """Serve MCP requests over standard input/output streams."""
 
         logger.info("Starting MCP stdio server version %s", PACKAGE_VERSION)
@@ -567,7 +569,9 @@ class MCPServer:
                     logger.debug("Handler returned error for %s: %s", peer, response)
 
                 if response is None:
-                    logger.debug("No response required for message id=%s", message.get("id"))
+                    logger.debug(
+                        "No response required for message id=%s", message.get("id")
+                    )
                     continue
 
                 encoded = self._encode_message(response, framing)

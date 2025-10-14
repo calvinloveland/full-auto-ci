@@ -26,7 +26,7 @@
 - [ ] Complete CLI functionality
   - [x] Add configuration commands *(new `config` subcommands for show/set/path)*
   - [x] Add user management *(new `user` add/list/remove commands backed by service)*
-  - [ ] Implement better output formatting
+  - [x] Implement better output formatting
 
 - [ ] Improve test coverage
   - [ ] Integration tests

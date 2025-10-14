@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -40,6 +41,24 @@ def dashboard_app(monkeypatch):
             output="{}",
             duration=1.2,
         )
+        data.insert_result(
+            commit_id,
+            tool="pytest",
+            status="success",
+            output=json.dumps(
+                {
+                    "status": "success",
+                    "summary": "2 passed in 0.04s",
+                    "counts": [
+                        {"label": "passed", "count": 2},
+                    ],
+                    "collected": 2,
+                    "duration": 0.04,
+                    "raw_output": "collected 2 items\n\n== 2 passed in 0.04s ==",
+                }
+            ),
+            duration=0.04,
+        )
 
         app = create_app(db_path=db_path)
         app.config.update(TESTING=True)
@@ -66,6 +85,8 @@ def test_repository_detail(client):
     assert "Demo" in body
     assert "abc1234" in body
     assert "pylint" in body
+    assert "pytest" in body
+    assert "2 passed" in body
 
 
 def test_repositories_partial(client):
@@ -82,6 +103,7 @@ def test_repository_insights_partial(client):
     body = response.data.decode()
     assert "Recent Test Runs" in body
     assert "abc1234" in body
+    assert "2 passed" in body
 
 
 def test_dashboard_main_runs(monkeypatch):

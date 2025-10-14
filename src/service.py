@@ -590,9 +590,15 @@ class CIService:
                 )
 
             for tool_name, tool_result in results.items():
-                status = tool_result.get("status", "unknown")
-                output = json.dumps(tool_result)
-                duration = float(tool_result.get("duration", 0.0) or 0.0)
+                if tool_result is None:
+                    continue
+
+                payload = dict(tool_result)
+                embedded_results = payload.pop("embedded_results", None)
+                status = payload.get("status", "unknown")
+                duration = float(payload.get("duration", 0.0) or 0.0)
+
+                output = json.dumps(payload)
                 self.data.insert_result(
                     commit_id,
                     tool=tool_name,
@@ -600,6 +606,32 @@ class CIService:
                     output=output,
                     duration=duration,
                 )
+
+                if embedded_results:
+                    for embedded in embedded_results:
+                        if not isinstance(embedded, dict):
+                            continue
+
+                        embedded_tool = embedded.get("tool")
+                        if not embedded_tool:
+                            continue
+
+                        embedded_status = embedded.get("status", "unknown")
+                        embedded_duration = float(embedded.get("duration", 0.0) or 0.0)
+                        embedded_output = embedded.get("output")
+
+                        if isinstance(embedded_output, str):
+                            output_text = embedded_output
+                        else:
+                            output_text = json.dumps(embedded_output or {})
+
+                        self.data.insert_result(
+                            commit_id,
+                            tool=str(embedded_tool),
+                            status=str(embedded_status),
+                            output=output_text,
+                            duration=embedded_duration,
+                        )
 
             logger.info("Stored test results for commit %s", commit_hash)
         except Exception as exc:  # pylint: disable=broad-except

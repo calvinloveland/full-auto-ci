@@ -113,7 +113,11 @@ class TestCLI(unittest.TestCase):
         exit_code = self.cli.run(["test", "run", "1", "abcdef"])
 
         self.assertEqual(exit_code, 0)
-        mock_print.assert_any_call("Warning: dirty repo")
+        lines = [
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        ]
+        self.assertTrue(any("dirty repo" in line for line in lines))
 
     @patch("builtins.print")
     def test_test_results_no_runs(self, mock_print):
@@ -168,12 +172,18 @@ class TestCLI(unittest.TestCase):
         exit_code = self.cli.run(["test", "results", "1"])
 
         self.assertEqual(exit_code, 0)
-        mock_print.assert_any_call("Test runs for repository 1")
-        mock_print.assert_any_call("Run 42 | Commit: abc1234 | Status: completed")
-        mock_print.assert_any_call("  Created: 1000 | Started: 1001 | Completed: 1002")
-        mock_print.assert_any_call("  Message: Update docs")
-        mock_print.assert_any_call("  - pylint: success (score 9.5)")
-        mock_print.assert_any_call("  - coverage: success (49.73%)")
+        lines = [
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        ]
+        joined = "\n".join(lines)
+        self.assertIn("Test runs for repository 1", joined)
+        self.assertIn("Run 42", joined)
+        self.assertIn("Commit", joined)
+        self.assertIn("abc1234", joined)
+        self.assertIn("✔ success", joined)
+        self.assertIn("score 9.5", joined)
+        self.assertIn("49.73%", joined)
 
     def test_run_unknown_command(self):
         """Test running an unknown command."""
@@ -246,8 +256,14 @@ class TestCLI(unittest.TestCase):
         exit_code = self.cli.run(["user", "list"])
 
         self.assertEqual(exit_code, 0)
-        mock_print.assert_any_call("ID | Username | Role | Created")
-        mock_print.assert_any_call("1 | alice | admin | 2024-01-01")
+        lines = [
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        ]
+        joined = "\n".join(lines)
+        self.assertIn("Users", joined)
+        self.assertIn("alice", joined)
+        self.assertIn("admin", joined)
 
     @patch("builtins.print")
     def test_user_add_success(self, mock_print):

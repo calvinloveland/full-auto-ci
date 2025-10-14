@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -522,16 +523,26 @@ class DataAccess:
             )
             rows = cursor.fetchall()
 
-        return [
-            {
-                "tool": row[0],
-                "status": row[1],
-                "output": row[2],
-                "duration": row[3],
-                "created_at": row[4],
-            }
-            for row in rows
-        ]
+        return [self._hydrate_result_row(row) for row in rows]
+
+    @staticmethod
+    def _hydrate_result_row(row: Tuple[Any, ...]) -> Dict[str, Any]:
+        tool, status, output_text, duration, created_at = row
+        parsed_output: Optional[Any] = None
+        if output_text:
+            try:
+                parsed_output = json.loads(output_text)
+            except (TypeError, json.JSONDecodeError):
+                parsed_output = None
+
+        return {
+            "tool": tool,
+            "status": status,
+            "output": output_text,
+            "duration": duration,
+            "created_at": created_at,
+            "data": parsed_output,
+        }
 
     # User management helpers
 
