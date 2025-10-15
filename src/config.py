@@ -76,8 +76,8 @@ class Config:
             return
 
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                user_config = yaml.safe_load(f)
+            with open(self.config_path, "r", encoding="utf-8") as config_file:
+                user_config = yaml.safe_load(config_file)
                 if user_config:
                     self._merge_config(user_config)
             logger.info("Loaded configuration from %s", self.config_path)
@@ -140,8 +140,8 @@ class Config:
             # Ensure directory exists
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
 
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                yaml.dump(self.config, f, default_flow_style=False)
+            with open(self.config_path, "w", encoding="utf-8") as config_file:
+                yaml.dump(self.config, config_file, default_flow_style=False)
             logger.info("Saved configuration to %s", self.config_path)
             return True
         except OSError as error:

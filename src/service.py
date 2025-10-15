@@ -145,13 +145,6 @@ class CIService:
                 exc,
             )
             return None
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.exception(
-                "Unexpected error loading provider %s: %s",
-                record.get("id"),
-                exc,
-            )
-            return None
         return provider
 
     def _load_providers(self) -> None:
@@ -164,6 +157,7 @@ class CIService:
 
     # Provider management -----------------------------------------------------
     def list_providers(self) -> List[Dict[str, Any]]:
+        """Return enriched provider descriptors for dashboard/CLI consumption."""
         providers: List[Dict[str, Any]] = []
         for record in self.data.list_external_providers():
             descriptor: Dict[str, Any] = {
@@ -200,6 +194,7 @@ class CIService:
         return providers
 
     def get_provider_types(self) -> List[Dict[str, Any]]:
+        """Expose metadata describing the registered provider types."""
         return list(self.provider_registry.available_types())
 
     def add_provider(
@@ -209,6 +204,7 @@ class CIService:
         *,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Register a new external provider and return its descriptor."""
         provider_cls = self.provider_registry.get(provider_type)
         config_dict = dict(config or {})
         errors = list(provider_cls.validate_static_config(config_dict))
@@ -235,6 +231,7 @@ class CIService:
         }
 
     def remove_provider(self, provider_id: int) -> bool:
+        """Delete a provider definition and drop any cached instance."""
         removed = self.data.delete_external_provider(provider_id)
         if removed:
             self._providers.pop(provider_id, None)
@@ -243,6 +240,7 @@ class CIService:
     def sync_provider(
         self, provider_id: int, *, limit: int = 50
     ) -> List[Dict[str, Any]]:
+        """Invoke ``sync_runs`` on the provider, returning normalized job data."""
         provider = self._providers.get(provider_id)
         if provider is None:
             record = self.data.fetch_external_provider(provider_id)

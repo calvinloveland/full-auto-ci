@@ -44,11 +44,11 @@ def _timeago(value: int | None) -> str:
         return "—"
 
     try:
-        dt = datetime.fromtimestamp(int(value))
+        timestamp_dt = datetime.fromtimestamp(int(value))
     except (TypeError, ValueError):
         return "—"
 
-    seconds = int((datetime.now() - dt).total_seconds())
+    seconds = int((datetime.now() - timestamp_dt).total_seconds())
     if seconds < 60:
         result = "just now"
     else:

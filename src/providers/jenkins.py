@@ -10,6 +10,8 @@ from .registry import provider
 
 @provider
 class JenkinsProvider(BaseProvider):
+    """Provider stub for Jenkins automation servers."""
+
     type_name = "jenkins"
     display_name = "Jenkins"
     description = "Integrate with Jenkins jobs and pipelines."

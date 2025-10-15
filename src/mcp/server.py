@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import sys
+import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -48,6 +49,8 @@ class MCPServer:
 
         self.service = service
         self.auth_token = auth_token
+        self._shutdown_event: asyncio.Event | None = None
+        self._session_id: str | None = None
         self._methods: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
             "initialize": self._handle_initialize,
             "handshake": self._handle_handshake,
@@ -57,6 +60,10 @@ class MCPServer:
             "addRepository": self._handle_add_repository,
             "removeRepository": self._handle_remove_repository,
             "runTests": self._handle_run_tests,
+            "logging/setLevel": self._handle_logging_set_level,
+            "tools/list": self._handle_tools_list,
+            "prompts/list": self._handle_prompts_list,
+            "shutdown": self._handle_shutdown,
         }
 
     async def handle_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -146,28 +153,24 @@ class MCPServer:
                 if isinstance(version, str) and version.strip()
             )
 
-        if not protocol_candidates:
-            logger.debug(
-                "Client omitted protocol version; falling back to default %s",
-                self._DEFAULT_PROTOCOL_VERSION,
-            )
-            protocol_candidates.append(self._DEFAULT_PROTOCOL_VERSION)
+        negotiated_version: Optional[str] = None
+        for candidate in protocol_candidates:
+            if candidate in self._SUPPORTED_PROTOCOL_VERSIONS:
+                negotiated_version = candidate
+                break
 
-        negotiated_version = next(
-            (
-                version
-                for version in protocol_candidates
-                if version in self._SUPPORTED_PROTOCOL_VERSIONS
-            ),
-            self._DEFAULT_PROTOCOL_VERSION,
-        )
-
-        if negotiated_version not in self._SUPPORTED_PROTOCOL_VERSIONS:
-            logger.debug(
-                "Client requested unsupported protocol versions %s; defaulting to %s",
-                protocol_candidates,
-                self._DEFAULT_PROTOCOL_VERSION,
-            )
+        if negotiated_version is None:
+            if protocol_candidates:
+                logger.warning(
+                    "Unsupported protocol requested: %s", protocol_candidates
+                )
+                raise MCPError(
+                    code=-32602,
+                    message="Unsupported protocol version",
+                    data={
+                        "supportedVersions": sorted(self._SUPPORTED_PROTOCOL_VERSIONS)
+                    },
+                )
             negotiated_version = self._DEFAULT_PROTOCOL_VERSION
 
         client_info = params.get("clientInfo")
@@ -177,6 +180,8 @@ class MCPServer:
         capabilities = params.get("capabilities")
         if not isinstance(capabilities, dict):
             capabilities = {}
+
+        self._session_id = uuid.uuid4().hex
 
         logger.debug(
             "Initialize negotiation complete. candidates=%s, negotiated=%s, client=%s",
@@ -196,6 +201,7 @@ class MCPServer:
                 "name": "full-auto-ci",
                 "version": PACKAGE_VERSION,
             },
+            "sessionId": self._session_id,
             "capabilities": self._server_capabilities(),
             "instructions": (
                 "This server exposes Full Auto CI operations via the "
@@ -331,6 +337,74 @@ class MCPServer:
 
         return {"status": status, "results": result}
 
+    async def _handle_logging_set_level(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Adjust the effective log level for the MCP server."""
+
+        level = params.get("level")
+        if not isinstance(level, str) or not level.strip():
+            raise MCPError(code=-32602, message="level must be a non-empty string")
+
+        normalized = level.strip().lower()
+        aliases = {
+            "warn": "warning",
+            "trace": "debug",
+            "notice": "info",
+            "fatal": "critical",
+            "critical": "critical",
+            "alert": "critical",
+            "emergency": "critical",
+        }
+        normalized = aliases.get(normalized, normalized)
+
+        valid_levels = {
+            "debug": logging.DEBUG,
+            "info": logging.INFO,
+            "warning": logging.WARNING,
+            "error": logging.ERROR,
+            "critical": logging.CRITICAL,
+        }
+
+        resolved = valid_levels.get(normalized)
+        if resolved is None:
+            raise MCPError(code=-32602, message=f"Unsupported log level: {level}")
+
+        logging.getLogger().setLevel(resolved)
+        logger.setLevel(resolved)
+
+        return {}
+
+    async def _handle_tools_list(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the catalog of available MCP tools."""
+
+        return {"tools": []}
+
+    async def _handle_prompts_list(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the catalog of available prompts."""
+
+        return {"prompts": []}
+
+    async def _handle_shutdown(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        """Request the server to stop processing new requests and exit."""
+
+        logger.info("Shutdown requested via MCP protocol")
+        triggered = self._trigger_shutdown()
+        if triggered:
+            logger.debug("Shutdown event signaled successfully")
+        else:
+            logger.warning("Shutdown requested but no active shutdown event is set")
+        return {"shuttingDown": triggered}
+
+    def _trigger_shutdown(self) -> bool:
+        """Signal the active shutdown event if present."""
+
+        event = self._shutdown_event
+        if event is None:
+            return False
+        if not event.is_set():
+            event.set()
+            return True
+        return False
+
     def _verify_token(self, method: str, params: Dict[str, Any]) -> None:
         """Validate the shared secret token if authentication is enabled."""
 
@@ -373,6 +447,9 @@ class MCPServer:
             port,
         )
 
+        event = shutdown_event or asyncio.Event()
+        self._shutdown_event = event
+
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             peer = writer.get_extra_info("peername")
             await self._serve_connection(reader, writer, peer)
@@ -382,15 +459,13 @@ class MCPServer:
         logger.info("MCP server listening on %s", sockets)
 
         try:
-            if shutdown_event is None:
-                await asyncio.Future()
-            else:
-                await shutdown_event.wait()
+            await event.wait()
         except asyncio.CancelledError:  # pragma: no cover - triggered on cancellation
             pass
         finally:
             server.close()
             await server.wait_closed()
+            self._shutdown_event = None
             logger.info("MCP server stopped")
 
     async def serve_stdio(self, *, shutdown_event: asyncio.Event | None = None) -> None:
@@ -398,6 +473,8 @@ class MCPServer:
 
         logger.info("Starting MCP stdio server version %s", PACKAGE_VERSION)
         loop = asyncio.get_running_loop()
+        event = shutdown_event or asyncio.Event()
+        self._shutdown_event = event
 
         reader = asyncio.StreamReader()
         reader_protocol = asyncio.StreamReaderProtocol(reader)
@@ -408,19 +485,27 @@ class MCPServer:
         )
         writer = asyncio.StreamWriter(writer_transport, writer_protocol, reader, loop)
 
+        serve_task = asyncio.create_task(
+            self._serve_connection(reader, writer, "stdio")
+        )
+        wait_task = asyncio.create_task(event.wait())
+
         try:
-            if shutdown_event is None:
-                await self._serve_connection(reader, writer, "stdio")
-            else:
-                await asyncio.gather(
-                    self._serve_connection(reader, writer, "stdio"),
-                    shutdown_event.wait(),
-                )
+            await asyncio.wait(
+                [serve_task, wait_task], return_when=asyncio.FIRST_COMPLETED
+            )
         finally:
+            serve_task.cancel()
+            wait_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await serve_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await wait_task
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
             logger.info("MCP stdio server stopped")
+            self._shutdown_event = None
 
     @staticmethod
     def _error_response(message_id: Any, error: MCPError) -> Dict[str, Any]:
@@ -509,6 +594,10 @@ class MCPServer:
                 "name": "getLatestResults",
                 "description": "Fetch recent test runs with tool results for a repository.",
             },
+            {
+                "name": "shutdown",
+                "description": "Request the MCP server to terminate.",
+            },
         ]
 
     @classmethod
@@ -516,6 +605,24 @@ class MCPServer:
         """Expose server capabilities in MCP-compliant format."""
 
         return {
+            "resources": {
+                "list": False,
+                "get": False,
+                "subscribe": False,
+                "listChanged": False,
+            },
+            "prompts": {
+                "list": True,
+                "get": False,
+            },
+            "tools": {
+                "list": True,
+                "call": False,
+            },
+            "logging": {
+                "subscribe": False,
+                "setLevel": True,
+            },
             "experimental": {
                 "fullAutoCI": {
                     "methods": [cap["name"] for cap in cls._legacy_capabilities()],

@@ -10,6 +10,8 @@ from .registry import provider
 
 @provider
 class GitHubActionsProvider(BaseProvider):
+    """Provider stub for GitHub Actions integration."""
+
     type_name = "github"
     display_name = "GitHub Actions"
     description = "Synchronize GitHub Actions workflow results into Full Auto CI."

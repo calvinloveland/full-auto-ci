@@ -28,15 +28,18 @@ class BaseProvider(ABC):
     # Public API -----------------------------------------------------------------
     @property
     def provider_id(self) -> int:
+        """Return the database identifier for the provider."""
         return int(self.record["id"])
 
     @property
     def name(self) -> str:
+        """Return the user-facing name for the provider."""
         return str(self.record["name"])
 
     @classmethod
     def validate_static_config(cls, config: Optional[Dict[str, Any]]) -> Iterable[str]:
         """Return validation errors for ``config`` (empty iterable when valid)."""
+        _ = config  # Placeholder for subclasses overriding the method.
         return ()
 
     def validate_runtime(self) -> Iterable[str]:
@@ -44,10 +47,7 @@ class BaseProvider(ABC):
         return self.validate_static_config(self.config)  # pragma: no cover - override
 
     def sync_runs(self, *, limit: int = 50) -> list[Dict[str, Any]]:
-        """Fetch recent job metadata and map to internal test runs.
-
-        Default implementation performs no work. Subclasses should override.
-        """
+        """Fetch recent job metadata and map to internal test runs."""
         _ = limit
         return []
 
@@ -69,6 +69,7 @@ class BaseProvider(ABC):
 
     # Utility helpers ------------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
+        """Return a serializable representation of the provider."""
         return {
             "id": self.provider_id,
             "name": self.name,
@@ -79,6 +80,7 @@ class BaseProvider(ABC):
         }
 
     def update_config(self, config: Dict[str, Any]) -> None:
+        """Persist an updated configuration back to storage."""
         errors = list(self.validate_static_config(config))
         if errors:
             raise ProviderConfigError("; ".join(errors))
@@ -87,6 +89,7 @@ class BaseProvider(ABC):
 
 
 def require_keys(config: Dict[str, Any], required: Iterable[str]) -> Iterable[str]:
+    """Yield validation errors for each missing required key."""
     for key in required:
         if key not in config or config[key] in (None, ""):
             yield f"Missing required configuration key '{key}'"

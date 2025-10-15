@@ -10,6 +10,8 @@ from .registry import provider
 
 @provider
 class BambooProvider(BaseProvider):
+    """Provider stub for Atlassian Bamboo plans."""
+
     type_name = "bamboo"
     display_name = "Bamboo CI"
     description = "Integrate with Atlassian Bamboo build plans."

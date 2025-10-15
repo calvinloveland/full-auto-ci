@@ -54,6 +54,7 @@ full-auto-ci = "src.cli:main"
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
+addopts = "-p no:pytest_cov"
 markers = [
     "only_browser(name): restrict Playwright tests to a specific browser",
 ]

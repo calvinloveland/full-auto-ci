@@ -7,7 +7,8 @@ import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 # Configure logging
 logging.basicConfig(
@@ -114,9 +115,9 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                     "stdout": process.stdout,
                     "stderr": process.stderr,
                 }
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as error:  # pylint: disable=broad-except
             logger.exception("Error running Pylint")
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(error)}
 
     def _discover_targets(self, repo_path: str) -> List[str]:
         """Determine which paths Pylint should analyze for the given repository."""
@@ -214,6 +215,29 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
 
     ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
+    @dataclass
+    class _RunContext:
+        returncode: int
+        duration: float
+        stdout: Optional[str]
+        stderr: Optional[str]
+        pytest_details: Optional[Dict[str, Any]]
+        pytest_summary: Optional[Dict[str, Any]]
+        embedded_results: List[Dict[str, Any]]
+
+    @dataclass
+    class _XmlContext:
+        returncode: int
+        duration: float
+        stdout: Optional[str]
+        stderr: Optional[str]
+
+    @dataclass
+    class _PytestSummary:
+        status: str
+        counts: List[Dict[str, Any]]
+        duration: Optional[float]
+
     def run(self, repo_path: str) -> Dict[str, Any]:
         """Run coverage.
 
@@ -223,124 +247,73 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
         Returns:
             Coverage results
         """
+        original_dir = os.getcwd()
         try:
-            # Change to repository directory
-            original_dir = os.getcwd()
             os.chdir(repo_path)
-
-            try:
-                # Run tests with coverage
-                logger.info("Running coverage on %s", repo_path)
-                cmd = ["coverage", "run", "-m"] + self.run_tests_cmd
-                start_time = time.perf_counter()
-                process = subprocess.run(
-                    cmd, capture_output=True, text=True, check=False
-                )
-                test_duration = time.perf_counter() - start_time
-
-                pytest_details = self._parse_pytest_output(process.stdout)
-                embedded_results: List[Dict[str, Any]] = []
-                pytest_summary = None
-                if pytest_details:
-                    summary_payload = dict(pytest_details)
-                    summary_payload.pop("raw_output", None)
-                    pytest_summary = summary_payload
-                    embedded_results.append(
-                        {
-                            "tool": "pytest",
-                            "status": pytest_details.get("status", "unknown"),
-                            "duration": pytest_details.get("duration") or test_duration,
-                            "output": pytest_details,
-                        }
-                    )
-
-                if process.returncode != 0:
-                    logger.error(
-                        "Test run failed with return code %s", process.returncode
-                    )
-                    error_result: Dict[str, Any] = {
-                        "status": "error",
-                        "error": f"Test run failed with return code {process.returncode}",
-                        "stdout": process.stdout,
-                        "stderr": process.stderr,
-                        "duration": test_duration,
-                    }
-                    if pytest_summary:
-                        error_result["pytest_summary"] = pytest_summary
-                    if embedded_results:
-                        error_result["embedded_results"] = embedded_results
-                    return error_result
-
-                # Generate XML report
-                cmd = ["coverage", "xml"]
-                start_xml = time.perf_counter()
-                process = subprocess.run(
-                    cmd, capture_output=True, text=True, check=False
-                )
-                xml_duration = time.perf_counter() - start_xml
-
-                if process.returncode != 0:
-                    logger.error(
-                        "Coverage XML generation failed with return code %s",
-                        process.returncode,
-                    )
-                    error_message = (
-                        "Coverage XML generation failed with return code "
-                        f"{process.returncode}"
-                    )
-                    error_result = {
-                        "status": "error",
-                        "error": error_message,
-                        "stdout": process.stdout,
-                        "stderr": process.stderr,
-                        "duration": test_duration + xml_duration,
-                    }
-                    if pytest_summary:
-                        error_result["pytest_summary"] = pytest_summary
-                    if embedded_results:
-                        error_result["embedded_results"] = embedded_results
-                    return error_result
-
-                # Parse coverage XML
-                coverage_xml_path = os.path.join(repo_path, "coverage.xml")
-                if not os.path.exists(coverage_xml_path):
-                    logger.error("Coverage XML file not found")
-                    return {"status": "error", "error": "Coverage XML file not found"}
-
-                tree = ET.parse(coverage_xml_path)
-                root = tree.getroot()
-
-                # Extract coverage percentage
-                coverage_pct = float(root.get("line-rate", "0")) * 100
-
-                # Extract detailed coverage by file
-                files_coverage = []
-                for class_elem in root.findall(".//class"):
-                    filename = class_elem.get("filename", "unknown")
-                    line_rate = float(class_elem.get("line-rate", "0")) * 100
-                    files_coverage.append({"filename": filename, "coverage": line_rate})
-
-                result: Dict[str, Any] = {
-                    "status": "success",
-                    "percentage": coverage_pct,
-                    "files": files_coverage,
-                    "duration": test_duration + xml_duration,
-                }
-                if pytest_summary:
-                    result["pytest_summary"] = pytest_summary
-                if embedded_results:
-                    result["embedded_results"] = embedded_results
-                return result
-            finally:
-                # Return to original directory
-                os.chdir(original_dir)
-        except Exception as e:  # pylint: disable=broad-except
+            return self._run_inside_repository(repo_path)
+        except Exception as error:  # pylint: disable=broad-except
             logger.exception("Error running Coverage")
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(error)}
+        finally:
+            os.chdir(original_dir)
+
+    def _run_inside_repository(self, repo_path: str) -> Dict[str, Any]:
+        run_ctx = self._execute_coverage_run(repo_path)
+        if run_ctx.returncode != 0:
+            return self._build_test_failure_result(run_ctx)
+
+        xml_ctx = self._generate_coverage_xml()
+        if xml_ctx.returncode != 0:
+            return self._build_xml_failure_result(run_ctx, xml_ctx)
+
+        try:
+            coverage_pct, files_coverage = self._load_coverage_report(repo_path)
+        except FileNotFoundError:
+            logger.error("Coverage XML file not found")
+            return {"status": "error", "error": "Coverage XML file not found"}
+
+        total_duration = run_ctx.duration + xml_ctx.duration
+        return self._build_success_result(
+            coverage_pct,
+            files_coverage,
+            total_duration,
+            run_ctx,
+        )
 
     @classmethod
     def _parse_pytest_output(cls, stdout: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not stdout:
+        prepared = cls._prepare_pytest_lines(stdout)
+        if not prepared:
+            return None
+
+        text, lines = prepared
+        summary_line = cls._find_summary_line(lines)
+        summary = cls._parse_summary_details(summary_line)
+        collected = cls._extract_collected_count(lines)
+        raw_output = cls._truncate_output(text)
+
+        return {
+            "status": summary.status,
+            "summary": summary_line,
+            "counts": summary.counts,
+            "collected": collected,
+            "duration": summary.duration,
+            "raw_output": raw_output,
+        }
+
+    @classmethod
+    def _prepare_pytest_lines(
+        cls, stdout: Optional[str]
+    ) -> Optional[Tuple[str, List[str]]]:
+        if stdout is None:
+            return None
+
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        elif not isinstance(stdout, str):
+            return None
+
+        if not stdout.strip():
             return None
 
         text = cls.ANSI_ESCAPE_RE.sub("", stdout).replace("\r\n", "\n")
@@ -348,56 +321,210 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
         if not lines:
             return None
 
-        summary_line = None
+        return text, lines
+
+    @staticmethod
+    def _find_summary_line(lines: List[str]) -> Optional[str]:
         for line in reversed(lines):
             if line.startswith("=") and line.endswith("="):
                 candidate = line.strip("= ")
                 if candidate:
-                    summary_line = candidate
-                    break
+                    return candidate
+        return None
 
+    @classmethod
+    def _parse_summary_details(
+        cls, summary_line: Optional[str]
+    ) -> "Coverage._PytestSummary":
+        if not summary_line:
+            return cls._PytestSummary(status="success", counts=[], duration=None)
+
+        counts = cls._extract_summary_counts(summary_line)
+        status = cls._derive_summary_status(counts)
+        duration = cls._extract_duration(summary_line)
+        return cls._PytestSummary(status=status, counts=counts, duration=duration)
+
+    @staticmethod
+    def _extract_summary_counts(summary_line: str) -> List[Dict[str, Any]]:
         counts: List[Dict[str, Any]] = []
-        status = "success"
-        duration = None
+        for count_str, label in re.findall(r"(\d+)\s+([A-Za-z_]+)", summary_line):
+            count = int(count_str)
+            if count <= 0:
+                continue
+            label_lower = label.lower()
+            counts.append({"label": label_lower, "count": count})
+        return counts
 
-        if summary_line:
-            for count_str, label in re.findall(r"(\d+)\s+([A-Za-z_]+)", summary_line):
-                count = int(count_str)
-                label_lower = label.lower()
-                if count > 0:
-                    counts.append({"label": label_lower, "count": count})
-                if label_lower in {"failed", "error", "errors"} and count > 0:
-                    status = "error"
+    @staticmethod
+    def _derive_summary_status(counts: List[Dict[str, Any]]) -> str:
+        for entry in counts:
+            if entry["label"] in {"failed", "error", "errors"}:
+                return "error"
+        return "success"
 
-            duration_match = re.search(r"in\s+([0-9]+(?:\.[0-9]+)?)s", summary_line)
-            if duration_match:
-                try:
-                    duration = float(duration_match.group(1))
-                except ValueError:
-                    duration = None
+    @staticmethod
+    def _extract_duration(summary_line: str) -> Optional[float]:
+        match = re.search(r"in\s+([0-9]+(?:\.[0-9]+)?)s", summary_line)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
 
-        collected = None
+    @staticmethod
+    def _extract_collected_count(lines: List[str]) -> Optional[int]:
         for line in lines:
             match = re.match(r"collected\s+(\d+)\s+items?", line, re.IGNORECASE)
-            if match:
-                try:
-                    collected = int(match.group(1))
-                except ValueError:
-                    collected = None
-                break
+            if not match:
+                continue
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        return None
 
-        raw_output = text.strip()
-        if len(raw_output) > 20000:
-            raw_output = raw_output[-20000:]
+    @staticmethod
+    def _truncate_output(text: str) -> str:
+        trimmed = text.strip()
+        if len(trimmed) <= 20000:
+            return trimmed
+        return trimmed[-20000:]
 
-        return {
-            "status": status,
-            "summary": summary_line,
-            "counts": counts,
-            "collected": collected,
-            "duration": duration,
-            "raw_output": raw_output,
+    def _execute_coverage_run(self, repo_path: str) -> "Coverage._RunContext":
+        logger.info("Running coverage on %s", repo_path)
+        cmd = ["coverage", "run", "-m", *self.run_tests_cmd]
+        start_time = time.perf_counter()
+        process = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        duration = time.perf_counter() - start_time
+
+        pytest_details = self._parse_pytest_output(process.stdout)
+        pytest_summary: Optional[Dict[str, Any]] = None
+        embedded_results: List[Dict[str, Any]] = []
+        if pytest_details:
+            pytest_summary = dict(pytest_details)
+            pytest_summary.pop("raw_output", None)
+            embedded_results.append(
+                {
+                    "tool": "pytest",
+                    "status": pytest_details.get("status", "unknown"),
+                    "duration": pytest_details.get("duration") or duration,
+                    "output": pytest_details,
+                }
+            )
+
+        return self._RunContext(
+            returncode=process.returncode,
+            duration=duration,
+            stdout=process.stdout,
+            stderr=process.stderr,
+            pytest_details=pytest_details,
+            pytest_summary=pytest_summary,
+            embedded_results=embedded_results,
+        )
+
+    def _generate_coverage_xml(self) -> "Coverage._XmlContext":
+        cmd = ["coverage", "xml"]
+        start_time = time.perf_counter()
+        process = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        duration = time.perf_counter() - start_time
+
+        return self._XmlContext(
+            returncode=process.returncode,
+            duration=duration,
+            stdout=process.stdout,
+            stderr=process.stderr,
+        )
+
+    def _load_coverage_report(
+        self, repo_path: str
+    ) -> Tuple[float, List[Dict[str, Any]]]:
+        coverage_xml_path = os.path.join(repo_path, "coverage.xml")
+        if not os.path.exists(coverage_xml_path):
+            raise FileNotFoundError("Coverage XML file not found")
+
+        tree = ET.parse(coverage_xml_path)
+        root = tree.getroot()
+
+        coverage_pct = float(root.get("line-rate", "0")) * 100
+        files_coverage = []
+        for class_elem in root.findall(".//class"):
+            filename = class_elem.get("filename", "unknown")
+            line_rate = float(class_elem.get("line-rate", "0")) * 100
+            files_coverage.append({"filename": filename, "coverage": line_rate})
+
+        return coverage_pct, files_coverage
+
+    def _build_test_failure_result(
+        self, run_ctx: "Coverage._RunContext"
+    ) -> Dict[str, Any]:
+        logger.error("Test run failed with return code %s", run_ctx.returncode)
+        error_result: Dict[str, Any] = {
+            "status": "error",
+            "error": f"Test run failed with return code {run_ctx.returncode}",
+            "stdout": run_ctx.stdout,
+            "stderr": run_ctx.stderr,
+            "duration": run_ctx.duration,
         }
+        self._apply_pytest_metadata(error_result, run_ctx)
+        return error_result
+
+    def _build_xml_failure_result(
+        self,
+        run_ctx: "Coverage._RunContext",
+        xml_ctx: "Coverage._XmlContext",
+    ) -> Dict[str, Any]:
+        logger.error(
+            "Coverage XML generation failed with return code %s",
+            xml_ctx.returncode,
+        )
+        error_result: Dict[str, Any] = {
+            "status": "error",
+            "error": (
+                "Coverage XML generation failed with return code "
+                f"{xml_ctx.returncode}"
+            ),
+            "stdout": xml_ctx.stdout,
+            "stderr": xml_ctx.stderr,
+            "duration": run_ctx.duration + xml_ctx.duration,
+        }
+        self._apply_pytest_metadata(error_result, run_ctx)
+        return error_result
+
+    def _build_success_result(
+        self,
+        coverage_pct: float,
+        files_coverage: List[Dict[str, Any]],
+        duration: float,
+        run_ctx: "Coverage._RunContext",
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "status": "success",
+            "percentage": coverage_pct,
+            "files": files_coverage,
+            "duration": duration,
+        }
+        self._apply_pytest_metadata(result, run_ctx)
+        return result
+
+    @staticmethod
+    def _apply_pytest_metadata(
+        payload: Dict[str, Any], run_ctx: "Coverage._RunContext"
+    ) -> None:
+        if run_ctx.pytest_summary:
+            payload["pytest_summary"] = run_ctx.pytest_summary
+        if run_ctx.embedded_results:
+            payload["embedded_results"] = run_ctx.embedded_results
 
 
 class ToolRunner:

@@ -313,6 +313,7 @@ class DataAccess:
     def create_external_provider(
         self, name: str, provider_type: str, config: Optional[Dict[str, Any]] = None
     ) -> int:
+        """Insert an external provider record and return its identifier."""
         created_at = int(time.time())
         config_json = self._serialize_json(config)
         with self._transaction() as conn:
@@ -327,6 +328,7 @@ class DataAccess:
             return int(cursor.lastrowid or 0)
 
     def list_external_providers(self) -> List[Dict[str, Any]]:
+        """Return all external providers in insertion order."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -352,6 +354,7 @@ class DataAccess:
         return providers
 
     def fetch_external_provider(self, provider_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch a specific external provider record by identifier."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -382,6 +385,7 @@ class DataAccess:
         name: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> bool:
+        """Update provider metadata; returns ``True`` when changes were saved."""
         assignments: List[str] = []
         params: List[Any] = []
 
@@ -406,6 +410,7 @@ class DataAccess:
             return cursor.rowcount > 0
 
     def delete_external_provider(self, provider_id: int) -> bool:
+        """Remove an external provider and report whether a row was deleted."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(

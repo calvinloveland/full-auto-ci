@@ -19,6 +19,7 @@ class ProviderRegistry:
 
     # Registration -------------------------------------------------------------
     def register(self, provider_cls: Type[BaseProvider]) -> Type[BaseProvider]:
+        """Register ``provider_cls`` and return it for decorator usage."""
         type_name = getattr(provider_cls, "type_name", None)
         if not type_name or not isinstance(type_name, str):
             raise ProviderRegistrationError(
@@ -37,6 +38,7 @@ class ProviderRegistry:
         return provider_cls
 
     def get(self, type_name: str) -> Type[BaseProvider]:
+        """Lookup a provider class by type name."""
         normalized = type_name.strip().lower()
         provider_cls = self._providers.get(normalized)
         if provider_cls is None:
@@ -44,6 +46,7 @@ class ProviderRegistry:
         return provider_cls
 
     def available_types(self) -> Iterable[Dict[str, Any]]:
+        """Yield metadata describing all registered provider types."""
         for type_name, provider_cls in sorted(self._providers.items()):
             yield {
                 "type": type_name,
@@ -52,6 +55,7 @@ class ProviderRegistry:
             }
 
     def create(self, type_name: str, service, record: Dict[str, Any]) -> BaseProvider:
+        """Instantiate and validate a provider of ``type_name``."""
         provider_cls = self.get(type_name)
         instance = provider_cls(service, record)
         errors = list(instance.validate_runtime())

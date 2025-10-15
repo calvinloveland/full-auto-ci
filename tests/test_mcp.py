@@ -175,6 +175,7 @@ def test_handshake_announces_capabilities(dummy_service):
         "queueTestRun",
         "getLatestResults",
         "runTests",
+        "shutdown",
     }
 
 
@@ -199,7 +200,15 @@ def test_initialize_negotiates_protocol_and_capabilities(dummy_service):
     assert result["protocolVersion"] == "2025-06-18"
     assert result["serverInfo"]["name"] == "full-auto-ci"
     assert result["serverInfo"]["version"] == PACKAGE_VERSION
-    assert "capabilities" in result
+    assert "sessionId" in result and isinstance(result["sessionId"], str)
+    capabilities = result["capabilities"]
+    assert set(capabilities.keys()) >= {
+        "resources",
+        "prompts",
+        "tools",
+        "logging",
+        "experimental",
+    }
     assert "instructions" in result
 
 
@@ -239,6 +248,41 @@ def test_initialize_defaults_missing_client_fields(dummy_service):
     result = response["result"]
     assert result["protocolVersion"] == "2025-06-18"
     assert result["serverInfo"]["name"] == "full-auto-ci"
+
+
+def test_initialize_rejects_unsupported_protocol(dummy_service):
+    server = MCPServer(dummy_service)
+    with pytest.raises(MCPError) as excinfo:
+        _run(
+            server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "1999-01-01"},
+                }
+            )
+        )
+
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data is not None
+    assert "supportedVersions" in excinfo.value.data
+
+
+def test_shutdown_handler_signals_event(dummy_service):
+    async def scenario():
+        server = MCPServer(dummy_service)
+        shutdown_event = asyncio.Event()
+        server._shutdown_event = shutdown_event
+
+        response = await server.handle_message(
+            {"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": {}}
+        )
+
+        assert response["result"]["shuttingDown"] is True
+        assert shutdown_event.is_set()
+
+    _run(scenario())
 
 
 def test_tcp_server_emits_initialize_response(dummy_service):

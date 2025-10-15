@@ -1,23 +1,17 @@
 """Command-line interface for Full Auto CI."""
 
 import argparse
-import asyncio
-import errno
 import json
 import logging
-import multiprocessing
-import os
-import signal
-import socket
 import sys
-import time
-import webbrowser
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import __version__ as PACKAGE_VERSION
-from .dashboard import create_app
-from .mcp import MCPServer
-from .providers import ProviderConfigError
+from .cli_mcp import serve as run_mcp_serve
+from .cli_providers import handle_provider_command as run_provider_command
+from .cli_service import handle_service_command as run_service_command
+from .cli_service import register_service_commands as add_service_commands
 from .service import CIService
 
 # Configure logging
@@ -27,43 +21,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _run_service_process(config_path: Optional[str], db_path: Optional[str]) -> None:
-    """Entry point for the background service process."""
-
-    service = CIService(config_path=config_path, db_path=db_path)
-
-    def _shutdown_handler(_signum, _frame):
-        logging.getLogger(__name__).info("Shutdown signal received; stopping service")
-        service.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown_handler)
-    signal.signal(signal.SIGINT, _shutdown_handler)
-
-    service.start()
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        service.stop()
-
-
-def _run_dashboard_process(config_path: Optional[str], db_path: Optional[str]) -> None:
-    app = create_app(config_path=config_path, db_path=db_path)
-    service = app.config["CI_SERVICE"]
-    dashboard_cfg = service.config.get("dashboard") or {}
-
-    host = str(dashboard_cfg.get("host", "127.0.0.1"))
-    port = int(dashboard_cfg.get("port", 8000) or 8000)
-    debug = bool(dashboard_cfg.get("debug", False))
-
-    logger.info("Starting dashboard on %s:%s", host, port)
-    try:
-        app.run(host=host, port=port, debug=debug, use_reloader=False)
-    finally:
-        logger.info("Dashboard process exiting")
+@dataclass(frozen=True)
+class _TableRenderContext:
+    headers: Tuple[str, ...]
+    rows: Sequence[Sequence[str]]
+    alignments: Sequence[str]
+    widths: Sequence[int]
 
 
 class CLI:
@@ -109,11 +72,7 @@ class CLI:
         return parser
 
     def _register_service_commands(self, subparsers) -> None:
-        service_parser = subparsers.add_parser("service", help="Service management")
-        service_subparsers = service_parser.add_subparsers(dest="service_command")
-        service_subparsers.add_parser("start", help="Start the CI service")
-        service_subparsers.add_parser("stop", help="Stop the CI service")
-        service_subparsers.add_parser("status", help="Check service status")
+        add_service_commands(subparsers)
 
     def _register_repo_commands(self, subparsers) -> None:
         repo_parser = subparsers.add_parser("repo", help="Repository management")
@@ -289,340 +248,20 @@ class CLI:
         return handler(parsed_args)
 
     def _handle_service_command(self, args: argparse.Namespace) -> int:
-        """Handle service commands.
-
-        Args:
-            args: Parsed arguments
-
-        Returns:
-            Exit code
-        """
-        handler_map = {
-            "start": self._service_start,
-            "stop": self._service_stop,
-            "status": self._service_status,
-        }
-
-        handler = handler_map.get(args.service_command)
-        if handler is None:
-            print(f"Error: Unknown service command {args.service_command}")
-            return 1
-
-        return handler(args)
-
-    def _service_start(self, _args: argparse.Namespace) -> int:
-        """Start the CI service in a background process."""
-
-        existing_pid = self._read_pid()
-        if existing_pid and self._is_pid_running(existing_pid):
-            print(f"Service already running (PID {existing_pid})")
-            return 0
-
-        dashboard_cfg = self.service.config.get("dashboard") or {}
-        host = str(dashboard_cfg.get("host", "127.0.0.1"))
-        port = dashboard_cfg.get("port", 8000)
-        visible_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-        dashboard_url = f"http://{visible_host}:{port}"
-
-        process = multiprocessing.Process(
-            target=_run_service_process,
-            args=(self.service.config.config_path, self.service.db_path),
-            daemon=False,
-        )
-        process.start()
-        time.sleep(0.5)
-
-        if not process.is_alive():
-            print("Error: Service failed to start. Check logs for details.")
-            return 1
-
-        self._write_pid_file(process.pid)
-        print(f"Service started in background (PID {process.pid}).")
-        print(f"Dashboard available at {dashboard_url}")
-        self._maybe_start_dashboard(dashboard_cfg)
-        self._maybe_open_dashboard(dashboard_url, dashboard_cfg)
-        return 0
-
-    def _service_stop(self, _args: argparse.Namespace) -> int:
-        """Stop the CI service if it is running."""
-
-        pid = self._read_pid()
-        if not pid or not self._is_pid_running(pid):
-            print("Service is not running")
-            self._remove_pid_file()
-            self._maybe_cleanup_dashboard()
-            return 0
-
-        print(f"Stopping service (PID {pid})...")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError as error:
-            logger.error("Failed to signal service process %s: %s", pid, error)
-            return 1
-
-        waited = 0.0
-        while self._is_pid_running(pid) and waited < 10.0:
-            time.sleep(0.2)
-            waited += 0.2
-
-        if self._is_pid_running(pid):
-            print(f"Service did not terminate in time (PID {pid})")
-            return 1
-
-        self._remove_pid_file()
-        self._stop_dashboard_process()
-        print("Service stopped")
-        return 0
-
-    def _service_status(self, _args: argparse.Namespace) -> int:
-        """Report service and dashboard process status."""
-
-        pid = self._read_pid()
-        if pid and self._is_pid_running(pid):
-            print(f"Service is running (PID {pid})")
-        else:
-            print("Service is not running")
-            self._remove_pid_file()
-
-        dashboard_pid = self._read_dashboard_pid()
-        if dashboard_pid and self._is_pid_running(dashboard_pid):
-            print(f"Dashboard is running (PID {dashboard_pid})")
-        elif dashboard_pid:
-            self._remove_dashboard_pid()
-
-        return 0
+        return run_service_command(self, args)
 
     def _handle_mcp_command(self, args: argparse.Namespace) -> int:
-        handler_map = {"serve": self._mcp_serve}
-        handler = handler_map.get(args.mcp_command)
-        if handler is None:
-            print(f"Error: Unknown MCP command {args.mcp_command}")
-            return 1
-        return handler(args)
-
-    def _mcp_serve(self, args: argparse.Namespace) -> int:
-        try:
-            log_level = self._resolve_log_level(getattr(args, "log_level", "INFO"))
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            return 1
-
-        root_logger = logging.getLogger()
-        root_logger.setLevel(log_level)
-        for handler in root_logger.handlers:
-            handler.setLevel(log_level)
-
-        logging.getLogger("src").setLevel(log_level)
-        logging.getLogger(__name__).setLevel(log_level)
-        logging.getLogger("src.mcp.server").setLevel(log_level)
-
-        logger.info(
-            "Launching MCP server version %s with log level %s",
-            PACKAGE_VERSION,
-            logging.getLevelName(log_level),
-        )
-
-        token = None
-        if not args.no_token:
-            token = args.token or os.getenv("FULL_AUTO_CI_MCP_TOKEN")
-
-        server = MCPServer(self.service, auth_token=token)
-        host = args.host
-        port = args.port
-        token_state = "enabled" if token else "disabled"
-
-        if args.stdio:
-            print(f"Starting MCP server on stdio (token={token_state})")
-        else:
-            probe_state = self._probe_mcp_server(host, port, token)
-            if probe_state == "available":
-                print(
-                    f"MCP server already running on {host}:{port} (token={token_state})"
-                )
-                return 0
-            if probe_state == "unauthorized":
-                print(
-                    "Error: MCP server is already running but rejected the provided token."
-                )
-                return 1
-
-            print(f"Starting MCP server on {host}:{port} (token={token_state})")
-
-        async def runner() -> None:
-            try:
-                if args.stdio:
-                    await server.serve_stdio()
-                else:
-                    await server.serve_tcp(host=host, port=port)
-            except OSError as exc:  # pragma: no cover - depends on environment
-                if not args.stdio and exc.errno == errno.EADDRINUSE:
-                    print(f"Error: MCP server port {host}:{port} is already in use.")
-                    return
-                raise
-            except asyncio.CancelledError:  # pragma: no cover
-                pass
-
-        try:
-            asyncio.run(runner())
-        except KeyboardInterrupt:
-            print("MCP server stopped")
-        return 0
-
-    def _handle_provider_command(self, args: argparse.Namespace) -> int:
-        handler_map = {
-            "list": self._provider_list,
-            "types": self._provider_types,
-            "add": self._provider_add,
-            "remove": self._provider_remove,
-            "sync": self._provider_sync,
-        }
-
-        command = getattr(args, "provider_command", None)
-        handler = handler_map.get(command)
-        if handler is None:
-            print(f"Error: Unknown provider command {command}")
-            return 1
-        return handler(args)
-
-    def _provider_list(self, _args: argparse.Namespace) -> int:
-        providers = self.service.list_providers()
-        if not providers:
-            print("No external providers configured.")
-            return 0
-
-        print("Configured providers:")
-        for provider in providers:
-            descriptor = provider.get("display_name") or provider["type"]
-            print(
-                f"  [{provider['id']}] {provider['name']} ({provider['type']}) -> {descriptor}"
+        if args.mcp_command == "serve":
+            return run_mcp_serve(
+                args,
+                service=self.service,
+                resolve_log_level=self._resolve_log_level,
             )
-        return 0
-
-    def _provider_types(self, _args: argparse.Namespace) -> int:
-        types = list(self.service.get_provider_types())
-        if not types:
-            print("No provider types registered.")
-            return 0
-
-        print("Available provider types:")
-        for entry in types:
-            description = entry.get("description") or ""
-            suffix = f" - {description}" if description else ""
-            print(f"  {entry['type']}: {entry['display_name']}{suffix}")
-        return 0
-
-    def _provider_add(self, args: argparse.Namespace) -> int:
-        try:
-            config = self._load_provider_config(
-                inline=getattr(args, "config", None),
-                file_path=getattr(args, "config_file", None),
-            )
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            return 1
-
-        try:
-            provider = self.service.add_provider(args.type, args.name, config=config)
-        except (ProviderConfigError, ValueError) as exc:
-            print(f"Error: {exc}")
-            return 1
-
-        print(
-            f"Provider '{provider.get('name', args.name)}' registered with id {provider.get('id')}"
-        )
-        return 0
-
-    def _provider_remove(self, args: argparse.Namespace) -> int:
-        removed = self.service.remove_provider(args.provider_id)
-        if removed:
-            print(f"Provider {args.provider_id} removed")
-            return 0
-        print(f"Error: Provider {args.provider_id} not found")
+        print(f"Error: Unknown MCP command {args.mcp_command}")
         return 1
 
-    def _provider_sync(self, args: argparse.Namespace) -> int:
-        try:
-            runs = self.service.sync_provider(args.provider_id, limit=args.limit)
-        except KeyError:
-            print(f"Error: Provider {args.provider_id} not found")
-            return 1
-        except RuntimeError as exc:
-            print(f"Error: {exc}")
-            return 1
-
-        count = len(runs) if isinstance(runs, list) else 0
-        print(f"Synced provider {args.provider_id}; fetched {count} run(s)")
-        return 0
-
-    def _load_provider_config(
-        self,
-        *,
-        inline: Optional[str],
-        file_path: Optional[str],
-    ) -> Dict[str, Any]:
-        if inline and file_path:
-            raise ValueError("Specify either --config or --config-file, not both")
-
-        if file_path:
-            try:
-                with open(file_path, "r", encoding="utf-8") as handle:
-                    return json.load(handle)
-            except FileNotFoundError as exc:  # pragma: no cover - pass through
-                raise ValueError(f"Configuration file not found: {file_path}") from exc
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in configuration file: {exc}") from exc
-
-        if inline:
-            try:
-                return json.loads(inline)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON payload: {exc}") from exc
-
-        return {}
-
-    def _probe_mcp_server(
-        self, host: str, port: int, token: Optional[str]
-    ) -> Optional[str]:
-        """Check whether an MCP server is already listening on the target port."""
-
-        try:
-            with socket.create_connection((host, port), timeout=1.0) as sock:
-                params: Dict[str, Any] = {}
-                if token:
-                    params["token"] = token
-                message = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "handshake",
-                    "params": params,
-                }
-                sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
-                sock.settimeout(1.0)
-                buffer = b""
-                while not buffer.endswith(b"\n"):
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    buffer += chunk
-        except (OSError, ValueError):
-            return None
-
-        if not buffer:
-            return None
-
-        try:
-            response = json.loads(buffer.decode("utf-8"))
-        except json.JSONDecodeError:
-            return None
-
-        if isinstance(response, dict) and "result" in response:
-            return "available"
-
-        error = response.get("error") if isinstance(response, dict) else None
-        if isinstance(error, dict) and error.get("code") == -32604:
-            return "unauthorized"
-
-        return None
+    def _handle_provider_command(self, args: argparse.Namespace) -> int:
+        return run_provider_command(self, args)
 
     def _handle_repo_command(self, args: argparse.Namespace) -> int:
         """Handle repository commands.
@@ -749,12 +388,7 @@ class CLI:
         )
 
         if not runs:
-            if args.commit:
-                print(
-                    f"No test runs found for repository {args.repo_id} and commit {args.commit}."
-                )
-            else:
-                print(f"No test runs found for repository {args.repo_id}.")
+            self._notify_missing_runs(args.repo_id, getattr(args, "commit", None))
             return 0
 
         self._print_heading(f"Test runs for repository {args.repo_id}")
@@ -764,58 +398,65 @@ class CLI:
         for index, run in enumerate(runs, start=1):
             if index > 1:
                 print("")
-
-            status_label = self._format_status(run.get("status"))
-            heading = f"Run {run['id']} • {status_label}"
-            self._print_subheading(heading)
-
-            commit_hash = run.get("commit_hash", "-")
-            created = run.get("created_at", "-")
-            started = run.get("started_at") or "-"
-            completed = run.get("completed_at") or "-"
-            message = (run.get("commit") or {}).get("message")
-
-            meta_rows = [
-                ("Commit", commit_hash),
-                ("Created", created),
-                ("Started", started),
-                ("Completed", completed),
-            ]
-            if message:
-                meta_rows.append(("Message", message))
-
-            self._print_key_values(meta_rows, indent=2)
-
-            if run.get("error"):
-                print(f"  [ERROR] {run['error']}")
-
-            results = run.get("results") or []
-            if results:
-                tool_rows = []
-                for result in results:
-                    tool = result.get("tool", "unknown")
-                    status = self._format_status(result.get("status"))
-                    summary = self._summarize_tool_output(
-                        result.get("output"), result.get("status")
-                    )
-                    tool_rows.append(
-                        (
-                            tool,
-                            status,
-                            summary or "—",
-                        )
-                    )
-
-                self._print_table(
-                    ("Tool", "Status", "Details"),
-                    tool_rows,
-                    title="  Tool results",
-                    alignments=("left", "left", "left"),
-                )
-            else:
-                print("  No tool results persisted")
+            self._render_test_run(run)
 
         return 0
+
+    def _notify_missing_runs(self, repo_id: int, commit: Optional[str]) -> None:
+        if commit:
+            print(f"No test runs found for repository {repo_id} and commit {commit}.")
+        else:
+            print(f"No test runs found for repository {repo_id}.")
+
+    def _render_test_run(self, run: Dict[str, Any]) -> None:
+        status_label = self._format_status(run.get("status"))
+        heading = f"Run {run['id']} • {status_label}"
+        self._print_subheading(heading)
+        self._print_run_metadata(run)
+
+        if run.get("error"):
+            print(f"  [ERROR] {run['error']}")
+
+        self._print_run_results(run.get("results") or [])
+
+    def _print_run_metadata(self, run: Dict[str, Any]) -> None:
+        commit_hash = run.get("commit_hash", "-")
+        created = run.get("created_at", "-")
+        started = run.get("started_at") or "-"
+        completed = run.get("completed_at") or "-"
+        meta_rows = [
+            ("Commit", commit_hash),
+            ("Created", created),
+            ("Started", started),
+            ("Completed", completed),
+        ]
+
+        message = (run.get("commit") or {}).get("message")
+        if message:
+            meta_rows.append(("Message", message))
+
+        self._print_key_values(meta_rows, indent=2)
+
+    def _print_run_results(self, results: Sequence[Dict[str, Any]]) -> None:
+        if not results:
+            print("  No tool results persisted")
+            return
+
+        tool_rows = []
+        for result in results:
+            tool_name = result.get("tool", "unknown")
+            status = self._format_status(result.get("status"))
+            summary = self._summarize_tool_output(
+                result.get("output"), result.get("status")
+            )
+            tool_rows.append((tool_name, status, summary or "—"))
+
+        self._print_table(
+            ("Tool", "Status", "Details"),
+            tool_rows,
+            title="  Tool results",
+            alignments=("left", "left", "left"),
+        )
 
     def _handle_config_command(self, args: argparse.Namespace) -> int:
         """Handle configuration commands."""
@@ -1024,48 +665,90 @@ class CLI:
         title: Optional[str] = None,
         alignments: Optional[Sequence[str]] = None,
     ) -> None:
-        rendered_rows = [
+        rendered_rows = self._stringify_table_rows(rows)
+        normalized_alignments = self._normalize_alignments(alignments, len(headers))
+        widths = self._calculate_column_widths(headers, rendered_rows)
+        context = _TableRenderContext(
+            headers=tuple(str(header) for header in headers),
+            rows=rendered_rows,
+            alignments=normalized_alignments,
+            widths=widths,
+        )
+        lines = self._generate_table_lines(title, context)
+
+        for line in lines:
+            print(line)
+
+    @staticmethod
+    def _stringify_table_rows(
+        rows: Iterable[Sequence[Any]],
+    ) -> List[Tuple[str, ...]]:
+        return [
             tuple("" if cell is None else str(cell) for cell in row) for row in rows
         ]
-        column_count = len(headers)
-        if alignments is None:
-            alignments = tuple("left" for _ in range(column_count))
-        else:
-            alignments = tuple((alignment or "left") for alignment in alignments)
 
+    @staticmethod
+    def _normalize_alignments(
+        alignments: Optional[Sequence[str]], column_count: int
+    ) -> Tuple[str, ...]:
+        if alignments is None:
+            return tuple("left" for _ in range(column_count))
+        return tuple((alignment or "left") for alignment in alignments)
+
+    @staticmethod
+    def _calculate_column_widths(
+        headers: Sequence[str], rendered_rows: Sequence[Sequence[str]]
+    ) -> List[int]:
         widths = [len(str(header)) for header in headers]
         for row in rendered_rows:
             for index, cell in enumerate(row):
                 widths[index] = max(widths[index], len(cell))
+        return widths
 
-        horizontal = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
-        header_sep = "+" + "+".join("=" * (width + 2) for width in widths) + "+"
+    @staticmethod
+    def _build_border(widths: Sequence[int], fill: str) -> str:
+        return "+" + "+".join(fill * (width + 2) for width in widths) + "+"
 
-        def format_row(row_values: Sequence[str]) -> str:
-            cells: List[str] = []
-            for idx, raw_value in enumerate(row_values):
-                align = alignments[idx] if idx < len(alignments) else "left"
-                if align == "right":
-                    cell = raw_value.rjust(widths[idx])
-                elif align == "center":
-                    cell = raw_value.center(widths[idx])
-                else:
-                    cell = raw_value.ljust(widths[idx])
-                cells.append(f" {cell} ")
-            return "|" + "|".join(cells) + "|"
-
-        output_lines: List[str] = []
+    def _generate_table_lines(
+        self,
+        title: Optional[str],
+        context: _TableRenderContext,
+    ) -> List[str]:
+        lines: List[str] = []
         if title:
-            output_lines.append(title)
-        output_lines.append(horizontal)
-        output_lines.append(format_row(tuple(str(header) for header in headers)))
-        output_lines.append(header_sep)
-        for row in rendered_rows:
-            output_lines.append(format_row(row))
-        output_lines.append(horizontal)
+            lines.append(title)
+        horizontal = self._build_border(context.widths, "-")
+        header_sep = self._build_border(context.widths, "=")
+        lines.append(horizontal)
+        lines.append(
+            self._format_table_row(context.headers, context.alignments, context.widths)
+        )
+        lines.append(header_sep)
+        for row in context.rows:
+            lines.append(
+                self._format_table_row(row, context.alignments, context.widths)
+            )
+        lines.append(horizontal)
+        return lines
 
-        for line in output_lines:
-            print(line)
+    @staticmethod
+    def _format_table_row(
+        row_values: Sequence[str],
+        alignments: Sequence[str],
+        widths: Sequence[int],
+    ) -> str:
+        cells: List[str] = []
+        for idx, raw_value in enumerate(row_values):
+            align = alignments[idx] if idx < len(alignments) else "left"
+            cell_width = widths[idx] if idx < len(widths) else 0
+            if align == "right":
+                cell_text = raw_value.rjust(cell_width)
+            elif align == "center":
+                cell_text = raw_value.center(cell_width)
+            else:
+                cell_text = raw_value.ljust(cell_width)
+            cells.append(f" {cell_text} ")
+        return "|" + "|".join(cells) + "|"
 
     @staticmethod
     def _summarize_tool_output(
@@ -1108,175 +791,6 @@ class CLI:
             return None
 
         return ", ".join(str(item) for item in extras)
-
-    def _pid_file_path(self) -> str:
-        base_dir = self.service.config.config.get(
-            "data_directory", os.path.expanduser("~/.fullautoci")
-        )
-        base_dir = os.path.expanduser(str(base_dir))
-        return os.path.join(base_dir, "service.pid")
-
-    def _write_pid_file(self, pid: int) -> None:
-        pid_path = self._pid_file_path()
-        try:
-            os.makedirs(os.path.dirname(pid_path), exist_ok=True)
-            with open(pid_path, "w", encoding="utf-8") as handle:
-                handle.write(str(pid))
-        except OSError as error:
-            logger.warning("Unable to write PID file %s: %s", pid_path, error)
-
-    def _remove_pid_file(self) -> None:
-        pid_path = self._pid_file_path()
-        try:
-            os.remove(pid_path)
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            logger.warning("Unable to remove PID file %s: %s", pid_path, error)
-
-    def _read_pid(self) -> Optional[int]:
-        pid_path = self._pid_file_path()
-        try:
-            with open(pid_path, "r", encoding="utf-8") as handle:
-                return int(handle.read().strip())
-        except (FileNotFoundError, ValueError):
-            return None
-
-    @staticmethod
-    def _is_pid_running(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
-
-    def _dashboard_pid_path(self) -> str:
-        base_dir = self.service.config.config.get(
-            "data_directory", os.path.expanduser("~/.fullautoci")
-        )
-        base_dir = os.path.expanduser(str(base_dir))
-        return os.path.join(base_dir, "dashboard.pid")
-
-    def _write_dashboard_pid(self, pid: int) -> None:
-        pid_path = self._dashboard_pid_path()
-        try:
-            os.makedirs(os.path.dirname(pid_path), exist_ok=True)
-            with open(pid_path, "w", encoding="utf-8") as handle:
-                handle.write(str(pid))
-        except OSError as error:
-            logger.warning("Unable to write dashboard PID file %s: %s", pid_path, error)
-
-    def _remove_dashboard_pid(self) -> None:
-        pid_path = self._dashboard_pid_path()
-        try:
-            os.remove(pid_path)
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            logger.warning(
-                "Unable to remove dashboard PID file %s: %s", pid_path, error
-            )
-
-    def _read_dashboard_pid(self) -> Optional[int]:
-        pid_path = self._dashboard_pid_path()
-        try:
-            with open(pid_path, "r", encoding="utf-8") as handle:
-                return int(handle.read().strip())
-        except (FileNotFoundError, ValueError):
-            return None
-
-    def _maybe_start_dashboard(self, dashboard_cfg: Dict[str, Any]) -> Optional[int]:
-        env_flag = os.getenv("FULL_AUTO_CI_START_DASHBOARD")
-        if env_flag is not None:
-            auto_start = env_flag.strip().lower() not in {"0", "false", "no"}
-        else:
-            auto_start = bool(dashboard_cfg.get("auto_start", True))
-
-        if not auto_start:
-            return None
-
-        existing_pid = self._read_dashboard_pid()
-        if existing_pid and self._is_pid_running(existing_pid):
-            print(f"Dashboard already running (PID {existing_pid}).")
-            return existing_pid
-
-        if existing_pid:
-            self._remove_dashboard_pid()
-
-        process = multiprocessing.Process(
-            target=_run_dashboard_process,
-            args=(self.service.config.config_path, self.service.db_path),
-            daemon=False,
-        )
-        process.start()
-        time.sleep(0.5)
-
-        if not process.is_alive():
-            print("Warning: Dashboard failed to start. Check logs for details.")
-            return None
-
-        self._write_dashboard_pid(process.pid)
-        print(f"Dashboard started in background (PID {process.pid}).")
-        return process.pid
-
-    def _stop_dashboard_process(self) -> None:
-        pid = self._read_dashboard_pid()
-        if not pid:
-            self._remove_dashboard_pid()
-            return
-
-        if not self._is_pid_running(pid):
-            self._remove_dashboard_pid()
-            return
-
-        print(f"Stopping dashboard (PID {pid})...")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError as error:
-            logger.warning("Failed to signal dashboard process %s: %s", pid, error)
-            self._remove_dashboard_pid()
-            return
-
-        waited = 0.0
-        while self._is_pid_running(pid) and waited < 5.0:
-            time.sleep(0.2)
-            waited += 0.2
-
-        if self._is_pid_running(pid):
-            print(f"Dashboard did not terminate in time (PID {pid})")
-        else:
-            print("Dashboard stopped")
-            self._remove_dashboard_pid()
-
-    def _maybe_cleanup_dashboard(self) -> None:
-        pid = self._read_dashboard_pid()
-        if pid and not self._is_pid_running(pid):
-            self._remove_dashboard_pid()
-
-    def _maybe_open_dashboard(self, url: str, dashboard_cfg: Dict[str, Any]) -> None:
-        env_flag = os.getenv("FULL_AUTO_CI_OPEN_BROWSER")
-
-        if env_flag is not None:
-            auto_open = env_flag.strip().lower() not in {"0", "false", "no"}
-        else:
-            auto_open = bool(dashboard_cfg.get("auto_open", True))
-
-        if not auto_open:
-            return
-
-        if not bool(dashboard_cfg.get("auto_start", True)):
-            logger.info(
-                "dashboard.auto_start disabled; ensure the server is running before using %s",
-                url,
-            )
-
-        try:
-            if webbrowser.open(url, new=2):
-                print(f"Opened {url} in your browser.")
-            else:
-                logger.info("Browser reported failure to open %s", url)
-        except Exception as error:  # pylint: disable=broad-except
-            logger.warning("Unable to open browser for %s: %s", url, error)
 
     @staticmethod
     def _resolve_log_level(value: str) -> int:

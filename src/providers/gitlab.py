@@ -10,6 +10,8 @@ from .registry import provider
 
 @provider
 class GitLabCIProvider(BaseProvider):
+    """Provider stub for GitLab pipelines."""
+
     type_name = "gitlab"
     display_name = "GitLab CI"
     description = "Synchronize GitLab pipelines and jobs."
