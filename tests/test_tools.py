@@ -1,12 +1,14 @@
 """Tests for the tools module."""
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.tools import Coverage, Pylint, Tool, ToolRunner
+from src.tools import Coverage, Lizard, Pylint, Tool, ToolRunner
 
 
 class TestTool(unittest.TestCase):
@@ -157,10 +159,18 @@ class TestCoverage(unittest.TestCase):
         """Test initialization."""
         self.assertEqual(self.coverage.name, "coverage")
         self.assertEqual(self.coverage.run_tests_cmd, ["pytest"])
+        self.assertIsNone(self.coverage.timeout)
+        self.assertIsNone(self.coverage.xml_timeout)
 
         # Test with custom command
-        custom_coverage = Coverage(run_tests_cmd=["python", "-m", "unittest"])
+        custom_coverage = Coverage(
+            run_tests_cmd=["python", "-m", "unittest"],
+            timeout=10,
+            xml_timeout=20,
+        )
         self.assertEqual(custom_coverage.run_tests_cmd, ["python", "-m", "unittest"])
+        self.assertEqual(custom_coverage.timeout, 10)
+        self.assertEqual(custom_coverage.xml_timeout, 20)
 
     @patch("os.chdir")
     @patch("subprocess.run")
@@ -188,18 +198,14 @@ class TestCoverage(unittest.TestCase):
         mock_file1.get.side_effect = lambda key, default: (
             "file1.py"
             if key == "filename"
-            else "0.9"
-            if key == "line-rate"
-            else default
+            else "0.9" if key == "line-rate" else default
         )
 
         mock_file2 = MagicMock()
         mock_file2.get.side_effect = lambda key, default: (
             "file2.py"
             if key == "filename"
-            else "0.8"
-            if key == "line-rate"
-            else default
+            else "0.8" if key == "line-rate" else default
         )
 
         mock_root.findall.return_value = [mock_file1, mock_file2]
@@ -240,6 +246,195 @@ class TestCoverage(unittest.TestCase):
         self.assertIn("error", result)
         self.assertEqual(result["error"], "Test run failed with return code 1")
         self.assertEqual(mock_chdir.call_args_list[0][0][0], "/path/to/repo")
+
+    @patch("os.chdir")
+    @patch("subprocess.run")
+    def test_run_test_timeout(self, mock_run, mock_chdir):
+        """Coverage reports a timeout when the test command hangs."""
+
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["coverage", "run", "-m", "pytest"],
+            timeout=5,
+            output="partial output",
+            stderr="timeout error",
+        )
+
+        coverage = Coverage(timeout=5)
+        result = coverage.run("/repo")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("timed out", result["error"].lower())
+        self.assertIn("timeout error", (result.get("stderr") or "").lower())
+        mock_chdir.assert_called()
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("os.chdir")
+    @patch("subprocess.run")
+    def test_run_xml_timeout(self, mock_run, mock_chdir):
+        """Coverage surfaces a timeout during XML generation."""
+
+        mock_test_process = MagicMock()
+        mock_test_process.returncode = 0
+        mock_test_process.stdout = (
+            "================== 1 passed in 0.50s =================="
+        )
+        mock_test_process.stderr = ""
+
+        mock_run.side_effect = [
+            mock_test_process,
+            subprocess.TimeoutExpired(
+                cmd=["coverage", "xml"],
+                timeout=2.5,
+                output="partial xml",
+                stderr="xml timeout",
+            ),
+        ]
+
+        coverage = Coverage(xml_timeout=2.5)
+        result = coverage.run("/repo")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("xml generation", result["error"].lower())
+        self.assertIn("xml timeout", (result.get("stderr") or "").lower())
+        self.assertEqual(mock_run.call_count, 2)
+        mock_chdir.assert_called()
+
+
+class TestLizard(unittest.TestCase):
+    """Test cases for the Lizard cyclomatic complexity tool."""
+
+    def setUp(self):
+        self.lizard = Lizard(max_ccn=8)
+
+    @patch("importlib.import_module")
+    @patch("subprocess.run")
+    def test_run_success_module(self, mock_run, mock_import_module):
+        function_a = SimpleNamespace(
+            long_name="foo",
+            name="foo",
+            cyclomatic_complexity=12,
+            start_line=12,
+            nloc=30,
+        )
+        function_b = SimpleNamespace(
+            long_name="bar",
+            name="bar",
+            cyclomatic_complexity=6,
+            start_line=4,
+            nloc=15,
+        )
+        file_a = SimpleNamespace(
+            filename="/repo/pkg/module.py",
+            function_list=[function_a],
+        )
+        file_b = SimpleNamespace(
+            filename="/repo/pkg/other.py",
+            function_list=[function_b],
+        )
+
+        mock_import_module.return_value = SimpleNamespace(
+            analyze=lambda paths: [file_a, file_b]
+        )
+
+        result = self.lizard.run("/repo")
+
+        self.assertEqual(result["status"], "success")
+        summary = result.get("summary")
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["total_functions"], 2)
+        self.assertAlmostEqual(summary["average_ccn"], 9.0)
+        self.assertEqual(summary["above_threshold"], 1)
+        self.assertIn("top_offenders", result)
+        self.assertEqual(result["top_offenders"][0]["name"], "foo")
+
+        mock_import_module.assert_called_once_with("lizard")
+        mock_run.assert_not_called()
+
+    @patch("importlib.import_module", side_effect=ModuleNotFoundError)
+    @patch("subprocess.run")
+    def test_run_cli_success(self, mock_run, _mock_import_module):
+        xml_payload = """
+<?xml version="1.0" ?>
+<cppncss>
+    <measure type="Function">
+        <labels>
+            <label>Nr.</label>
+            <label>NCSS</label>
+            <label>CCN</label>
+        </labels>
+        <item name="foo(...) at pkg/module.py:12">
+            <value>1</value>
+            <value>30</value>
+            <value>12</value>
+        </item>
+        <item name="bar(...) at pkg/other.py:4">
+            <value>1</value>
+            <value>15</value>
+            <value>6</value>
+        </item>
+    </measure>
+</cppncss>
+""".strip()
+
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.stdout = xml_payload
+        mock_process.stderr = ""
+        mock_run.return_value = mock_process
+
+        result = self.lizard.run("/repo")
+
+        self.assertEqual(result["status"], "success")
+        summary = result.get("summary")
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["total_functions"], 2)
+        self.assertAlmostEqual(summary["average_ccn"], 9.0)
+        self.assertEqual(summary["above_threshold"], 1)
+        self.assertIn("top_offenders", result)
+        self.assertEqual(result["top_offenders"][0]["name"], "foo(...)")
+
+        mock_run.assert_called_with(
+            ["lizard", "--xml", "."],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd="/repo",
+        )
+
+    @patch("importlib.import_module", side_effect=ModuleNotFoundError)
+    @patch("subprocess.run")
+    def test_run_cli_failure(self, mock_run, _mock_import_module):
+        mock_process = MagicMock()
+        mock_process.returncode = 1
+        mock_process.stdout = ""
+        mock_process.stderr = "boom"
+        mock_run.return_value = mock_process
+
+        result = self.lizard.run("/repo")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Lizard CLI returned", result["error"])
+
+    @patch("importlib.import_module", side_effect=ModuleNotFoundError)
+    @patch("subprocess.run")
+    def test_run_cli_invalid_xml(self, mock_run, _mock_import_module):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.stdout = "not xml"
+        mock_process.stderr = ""
+        mock_run.return_value = mock_process
+
+        result = self.lizard.run("/repo")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Failed to parse", result["error"])
+
+    @patch("importlib.import_module", side_effect=ModuleNotFoundError)
+    @patch("subprocess.run", side_effect=FileNotFoundError)
+    def test_run_missing_binary(self, _mock_run, _mock_import_module):
+        result = self.lizard.run("/repo")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Lizard executable not found", result["error"])
 
 
 class TestToolRunner(unittest.TestCase):

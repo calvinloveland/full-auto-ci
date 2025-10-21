@@ -1,4 +1,5 @@
 """Project-wide Python startup customizations."""
+
 from __future__ import annotations
 
 import os

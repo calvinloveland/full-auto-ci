@@ -24,7 +24,9 @@ classifiers = [
 dependencies = [
     "pylint>=2.8.0",
     "coverage>=5.5",
+    "lizard>=1.17.10",
     "pytest>=6.2.5",
+    "pytest-timeout>=2.1.0",
     "PyYAML>=6.0",
 ]
 
@@ -39,6 +41,7 @@ dashboard = [
 ]
 dev = [
     "pytest>=6.2.5",
+    "pytest-timeout>=2.1.0",
     "pytest-cov>=2.12.1",
     "black>=21.5b2",
     "isort>=5.9.1",
@@ -55,8 +58,11 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 addopts = "-p no:pytest_cov"
+timeout = 60
+timeout_method = "thread"
 markers = [
     "only_browser(name): restrict Playwright tests to a specific browser",
+    "integration: integration tests exercising external tooling",
 ]
 
 [tool.coverage.run]

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 from src.service import CIService
 
 
@@ -36,6 +38,64 @@ class TestCIService(unittest.TestCase):
         """Test initialization."""
         self.assertEqual(self.service.db_path, self.temp_db_path)
         self.assertFalse(self.service.running)
+
+    def test_tool_runner_respects_config(self):
+        cfg_fd, cfg_path = tempfile.mkstemp(suffix=".yml")
+        os.close(cfg_fd)
+        config_data = {
+            "tools": {
+                "pylint": {"enabled": False},
+                "coverage": {"enabled": False},
+                "lizard": {"enabled": True, "max_ccn": 7},
+            }
+        }
+
+        with open(cfg_path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_data, handle)
+
+        try:
+            service = CIService(config_path=cfg_path, db_path=self.temp_db_path)
+            tool_names = [tool.name for tool in service.tool_runner.tools]
+            self.assertNotIn("pylint", tool_names)
+            self.assertNotIn("coverage", tool_names)
+            self.assertIn("lizard", tool_names)
+
+            lizard_tool = next(
+                tool for tool in service.tool_runner.tools if tool.name == "lizard"
+            )
+            self.assertEqual(lizard_tool.max_ccn, 7)
+        finally:
+            os.unlink(cfg_path)
+
+    def test_tool_runner_configures_coverage_timeouts(self):
+        cfg_fd, cfg_path = tempfile.mkstemp(suffix=".yml")
+        os.close(cfg_fd)
+        config_data = {
+            "tools": {
+                "pylint": {"enabled": False},
+                "coverage": {
+                    "enabled": True,
+                    "run_tests_cmd": ["pytest", "-k", "slow"],
+                    "timeout_seconds": 12,
+                    "xml_timeout_seconds": "3.5",
+                },
+                "lizard": {"enabled": False},
+            }
+        }
+
+        with open(cfg_path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_data, handle)
+
+        try:
+            service = CIService(config_path=cfg_path, db_path=self.temp_db_path)
+            tools = service.tool_runner.tools
+            self.assertEqual(len(tools), 1)
+            coverage_tool = tools[0]
+            self.assertEqual(coverage_tool.run_tests_cmd, ["pytest", "-k", "slow"])
+            self.assertEqual(coverage_tool.timeout, 12.0)
+            self.assertEqual(coverage_tool.xml_timeout, 3.5)
+        finally:
+            os.unlink(cfg_path)
 
     def test_add_repository(self):
         """Test adding a repository."""
@@ -175,6 +235,7 @@ class TestCIService(unittest.TestCase):
                 mock_tool_runner.run_all.return_value = {
                     "pylint": {"status": "success"},
                     "coverage": {"status": "success"},
+                    "lizard": {"status": "success"},
                 }
 
                 result = self.service.run_tests(1, "abcdef")
@@ -183,6 +244,7 @@ class TestCIService(unittest.TestCase):
         self.assertEqual(result["test_run_id"], 42)
         self.assertIn("pylint", result["tools"])
         self.assertIn("coverage", result["tools"])
+        self.assertIn("lizard", result["tools"])
         mock_update_run.assert_any_call(42, "running")
         mock_update_run.assert_any_call(42, "completed")
         mock_store.assert_called_once()
@@ -250,7 +312,10 @@ class TestCIService(unittest.TestCase):
         with patch("src.service.os.path.exists", return_value=True), patch.object(
             self.service, "tool_runner"
         ) as mock_runner:
-            mock_runner.run_all.return_value = {"pylint": {"status": "success"}}
+            mock_runner.run_all.return_value = {
+                "pylint": {"status": "success"},
+                "lizard": {"status": "success"},
+            }
             result = self.service.run_tests(1, "abcdef")
 
         self.assertIn("warnings", result)

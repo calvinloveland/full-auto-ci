@@ -47,6 +47,12 @@ class Config:
             "coverage": {
                 "enabled": True,
                 "run_tests_cmd": ["pytest"],
+                "timeout_seconds": 300,
+                "xml_timeout_seconds": 120,
+            },
+            "lizard": {
+                "enabled": True,
+                "max_ccn": 10,
             },
         },
         "dogfood": {

@@ -779,6 +779,25 @@ class CLI:
         if isinstance(percentage, (int, float)):
             extras.append(f"{percentage:.2f}%")
 
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            avg_ccn = summary.get("average_ccn")
+            if isinstance(avg_ccn, (int, float)):
+                extras.append(f"avg CCN {avg_ccn:.2f}")
+
+            max_ccn = summary.get("max_ccn")
+            if isinstance(max_ccn, (int, float)):
+                extras.append(f"max {max_ccn:g}")
+
+            threshold = summary.get("threshold")
+            above = summary.get("above_threshold")
+            if (
+                isinstance(threshold, (int, float))
+                and isinstance(above, int)
+                and above > 0
+            ):
+                extras.append(f">{threshold:g} in {above}")
+
         # Provide a single detail message if available when no other extras
         if not extras:
             details = payload.get("details")

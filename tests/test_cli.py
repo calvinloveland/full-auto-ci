@@ -181,6 +181,22 @@ class TestCLI(unittest.TestCase):
                     "output": json.dumps({"status": "success", "percentage": 49.73}),
                     "duration": 1.2,
                 },
+                {
+                    "tool": "lizard",
+                    "status": "success",
+                    "output": json.dumps(
+                        {
+                            "status": "success",
+                            "summary": {
+                                "average_ccn": 3.25,
+                                "max_ccn": 12,
+                                "threshold": 10,
+                                "above_threshold": 1,
+                            },
+                        }
+                    ),
+                    "duration": 0.3,
+                },
             ],
         }
 
@@ -203,6 +219,7 @@ class TestCLI(unittest.TestCase):
         self.assertIn("✔ success", joined)
         self.assertIn("score 9.5", joined)
         self.assertIn("49.73%", joined)
+        self.assertIn("avg CCN 3.25", joined)
 
     def test_run_unknown_command(self):
         """Test running an unknown command."""
@@ -616,8 +633,25 @@ class TestCLI(unittest.TestCase):
         mock_probe.assert_not_called()
         mock_server.serve_stdio.assert_awaited_once()
 
+    @patch("src.cli_mcp.asyncio.run")
+    @patch("src.cli_mcp.MCPServer")
     @patch("builtins.print")
-    def test_mcp_serve_restarts_existing_server(self, mock_print):
+    def test_mcp_serve_restarts_existing_server(
+        self, mock_print, mock_server_cls, mock_async_run
+    ):
+        mock_server = MagicMock()
+        mock_server.serve_tcp = AsyncMock(return_value=None)
+        mock_server_cls.return_value = mock_server
+
+        def fake_run(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        mock_async_run.side_effect = fake_run
+
         with patch("src.cli_mcp._probe_mcp_server", return_value="available"), patch(
             "src.cli_mcp._request_mcp_shutdown", return_value="success"
         ) as mock_shutdown, patch(
@@ -630,6 +664,8 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         mock_shutdown.assert_called_once_with("127.0.0.1", 8765, None)
         mock_wait.assert_called_once_with("127.0.0.1", 8765, None, timeout=5.0)
+        mock_server.serve_tcp.assert_awaited_once_with(host="127.0.0.1", port=8765)
+        mock_async_run.assert_called_once()
         mock_print.assert_any_call(
             "Restarting MCP server on 127.0.0.1:8765 (token=disabled)"
         )

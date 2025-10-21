@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from pathlib import Path
 from typing import Dict
 
@@ -10,7 +12,7 @@ import pytest
 
 from src.cli import CLI
 from src.service import CIService
-from src.tools import ToolRunner
+from src.tools import Lizard, ToolRunner
 
 
 class DummyTool:
@@ -141,3 +143,73 @@ def test_cli_test_run_end_to_end(capsys, integration_service):
     captured = capsys.readouterr().out
     assert "Overall" in captured
     assert "dummy" in captured
+
+
+def _ensure_lizard_on_path(monkeypatch) -> bool:
+    """Ensure the lizard binary is discoverable on PATH for integration tests."""
+
+    if shutil.which("lizard"):
+        return True
+
+    candidate = Path.home() / ".local" / "bin" / "lizard"
+    if candidate.exists():
+        current_path = os.environ.get("PATH", "")
+        segments = [segment for segment in current_path.split(os.pathsep) if segment]
+        if str(candidate.parent) not in segments:
+            segments.append(str(candidate.parent))
+            monkeypatch.setenv("PATH", os.pathsep.join(segments))
+        return shutil.which("lizard") is not None
+
+    return False
+
+
+@pytest.mark.integration
+def test_run_tests_executes_lizard(monkeypatch, tmp_path):
+    """Ensure CIService executes the Lizard tool and persists its results."""
+
+    if not _ensure_lizard_on_path(monkeypatch):
+        pytest.skip("lizard CLI not available")
+
+    monkeypatch.setenv("FULL_AUTO_CI_DOGFOOD", "0")
+
+    db_path = tmp_path / "ci.sqlite"
+    service = CIService(config_path=None, db_path=str(db_path))
+
+    repo_dir = tmp_path / "lizard_repo"
+    repo_dir.mkdir()
+    (repo_dir / "module.py").write_text(
+        """
+def categorize(value):
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "zero"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    repo_id = service.data.create_repository("Lizard Repo", str(repo_dir), "main")
+    fake_repo = FakeRepo(repo_id, repo_dir)
+    service.git_tracker = StubGitTracker({repo_id: fake_repo})
+
+    service.tool_runner = ToolRunner([Lizard(max_ccn=10)])
+
+    result = service.run_tests(repo_id, "deadbeef")
+
+    assert result["status"] == "success"
+    assert "lizard" in result["tools"]
+
+    lizard_result = result["tools"]["lizard"]
+    assert lizard_result["status"] == "success"
+    summary = lizard_result.get("summary")
+    assert summary
+    assert summary["total_functions"] >= 1
+    assert summary["average_ccn"] >= 0
+
+    stored_results = service.data.fetch_results_for_test_run(result["test_run_id"])
+    assert stored_results
+    stored_entry = next(entry for entry in stored_results if entry["tool"] == "lizard")
+    stored_payload = json.loads(stored_entry["output"])
+    assert stored_payload["status"] == "success"
+    assert stored_payload["summary"]["total_functions"] >= 1

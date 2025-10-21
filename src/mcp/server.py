@@ -627,7 +627,7 @@ class MCPServer:
                 "fullAutoCI": {
                     "methods": [cap["name"] for cap in cls._legacy_capabilities()],
                 }
-            }
+            },
         }
 
     async def _serve_connection(
