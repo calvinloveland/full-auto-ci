@@ -23,10 +23,34 @@ tools:
   pylint:
     enabled: true
     config_file: "~/.fullautoci/pylintrc"  # Custom pylint configuration
+    ratchet:
+      enabled: false
+      target: 10.0
+      metric: "score"
+      direction: "higher"
+      tolerance: 0.0
   
   coverage:
     enabled: true
     run_tests_cmd: ["pytest", "-xvs"]  # Custom test command
+    timeout_seconds: 300
+    xml_timeout_seconds: 120
+    ratchet:
+      enabled: false
+      target: 90.0
+      metric: "percentage"
+      direction: "higher"
+      tolerance: 0.0
+
+  lizard:
+    enabled: true
+    max_ccn: 10
+    ratchet:
+      enabled: false
+      target: 0.0
+      metric: "summary.above_threshold"
+      direction: "lower"
+      tolerance: 0.0
 
 # Repository-specific configuration
 repositories:

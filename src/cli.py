@@ -3,7 +3,9 @@
 import argparse
 import json
 import logging
+import os
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -69,6 +71,7 @@ class CLI:
         self._register_user_commands(subparsers)
         self._register_mcp_commands(subparsers)
         self._register_provider_commands(subparsers)
+        self._register_dogfood_commands(subparsers)
         return parser
 
     def _register_service_commands(self, subparsers) -> None:
@@ -209,6 +212,38 @@ class CLI:
             help="Maximum number of runs to fetch (default: 50)",
         )
 
+    def _register_dogfood_commands(self, subparsers) -> None:
+        dogfood_parser = subparsers.add_parser(
+            "dogfood",
+            help="Run Full Auto CI against the current repository context",
+        )
+        dogfood_parser.add_argument(
+            "--repo-url",
+            help="Repository clone URL (defaults to CI environment values)",
+        )
+        dogfood_parser.add_argument(
+            "--branch",
+            help="Branch or ref to test (defaults to event head ref)",
+        )
+        dogfood_parser.add_argument(
+            "--commit",
+            help="Commit SHA to test (defaults to event head SHA)",
+        )
+        dogfood_parser.add_argument(
+            "--name",
+            help="Display name for the repository (defaults to repo full name)",
+        )
+        dogfood_parser.add_argument(
+            "--db-path",
+            dest="db_path",
+            help="SQLite database path override",
+        )
+        dogfood_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit raw JSON results instead of a formatted summary",
+        )
+
     def run(self, args: Optional[List[str]] = None) -> int:
         """Run the CLI with the given arguments.
 
@@ -238,6 +273,7 @@ class CLI:
             "user": self._handle_user_command,
             "mcp": self._handle_mcp_command,
             "provider": self._handle_provider_command,
+            "dogfood": self._handle_dogfood_command,
         }
 
         handler = handler_map.get(parsed_args.command)
@@ -262,6 +298,234 @@ class CLI:
 
     def _handle_provider_command(self, args: argparse.Namespace) -> int:
         return run_provider_command(self, args)
+
+    def _handle_dogfood_command(self, args: argparse.Namespace) -> int:
+        context = self._resolve_dogfood_context(args)
+
+        if not context["url"]:
+            print("Error: Unable to determine repository URL for dogfooding")
+            return 1
+        if not context["commit"]:
+            print("Error: Unable to determine commit SHA for dogfooding")
+            return 1
+
+        service = self.service
+        db_path = context.get("db_path")
+        if db_path and os.path.abspath(db_path) != os.path.abspath(service.db_path):
+            service = CIService(config_path=self.config_path, db_path=db_path)
+
+        repo_id = self._ensure_dogfood_repository(service, context)
+        if not repo_id:
+            print("Error: Failed to register repository for dogfooding")
+            return 1
+
+        result = service.run_tests(repo_id, context["commit"])
+
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            self._print_dogfood_summary(context, result)
+
+        return 0 if result.get("status") == "success" else 1
+
+    def _resolve_dogfood_context(self, args: argparse.Namespace) -> Dict[str, Any]:
+        event_payload = self._load_github_event()
+
+        repo_url = args.repo_url or os.getenv("FULL_AUTO_CI_REPO_URL")
+        if not repo_url:
+            repo_url = self._github_repo_url_from_event(event_payload)
+
+        branch = args.branch or os.getenv("FULL_AUTO_CI_REPO_BRANCH")
+        if not branch:
+            branch = self._github_branch_from_event(event_payload)
+
+        commit = (
+            args.commit
+            or os.getenv("FULL_AUTO_CI_COMMIT")
+            or os.getenv("FULL_AUTO_CI_COMMIT_HASH")
+        )
+        if not commit:
+            commit = self._github_commit_from_event(event_payload)
+
+        name = args.name or os.getenv("FULL_AUTO_CI_REPO_NAME")
+        if not name:
+            name = self._github_repo_name_from_event(event_payload)
+
+        raw_repo_url = repo_url
+        repo_url = self._inject_github_token(repo_url) if repo_url else None
+        display_name = name or self._strip_url_credentials(raw_repo_url) or "repository"
+
+        db_path = args.db_path or os.getenv("FULL_AUTO_CI_DB_PATH")
+        if not db_path:
+            db_path = getattr(self.service, "db_path", None)
+
+        return {
+            "url": repo_url,
+            "branch": branch or "main",
+            "commit": commit,
+            "name": display_name,
+            "db_path": db_path,
+        }
+
+    def _ensure_dogfood_repository(
+        self, service: CIService, context: Dict[str, Any]
+    ) -> Optional[int]:
+        branch = context.get("branch") or "main"
+        for repo in service.list_repositories():
+            if repo.get("url") == context["url"] and repo.get("branch") == branch:
+                return repo.get("id")
+
+        name = context.get("name") or context["url"]
+        return service.add_repository(name, context["url"], branch)
+
+    def _print_dogfood_summary(
+        self, context: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        repo_name = context.get("name", "repository")
+        commit = context.get("commit") or ""
+        short_commit = commit[:7] if commit else "unknown"
+        status_line = self._format_status(result.get("status"))
+        print(f"Dogfood run for {repo_name} @ {short_commit}: {status_line}")
+
+        for warning in result.get("warnings", []) or []:
+            print(f"[WARN] {warning}")
+
+        tools = result.get("tools") or {}
+        for tool_name in sorted(tools):
+            tool_result = tools.get(tool_name) or {}
+            tool_status = self._format_status(tool_result.get("status"))
+            line = f" - {tool_name}: {tool_status}"
+            error_message = tool_result.get("error")
+            if error_message:
+                line += f" ({error_message})"
+            print(line)
+
+    def _load_github_event(self) -> Dict[str, Any]:
+        event_path = os.getenv("GITHUB_EVENT_PATH")
+        if not event_path:
+            return {}
+
+        try:
+            with open(event_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+                if isinstance(payload, dict):
+                    return payload
+        except (OSError, json.JSONDecodeError):
+            logger.debug("Unable to parse GitHub event payload", exc_info=True)
+        return {}
+
+    def _github_repo_url_from_event(
+        self, event_payload: Dict[str, Any]
+    ) -> Optional[str]:
+        pull_request = event_payload.get("pull_request")
+        if isinstance(pull_request, dict):
+            head = pull_request.get("head")
+            if isinstance(head, dict):
+                head_repo = head.get("repo")
+                if isinstance(head_repo, dict):
+                    url = head_repo.get("clone_url") or head_repo.get("git_http_url")
+                    if url:
+                        return url
+
+        repository = event_payload.get("repository")
+        if isinstance(repository, dict):
+            url = repository.get("clone_url") or repository.get("git_http_url")
+            if url:
+                return url
+
+        repo_name = os.getenv("GITHUB_REPOSITORY")
+        if repo_name:
+            return f"https://github.com/{repo_name}.git"
+        return None
+
+    def _github_branch_from_event(self, event_payload: Dict[str, Any]) -> Optional[str]:
+        pull_request = event_payload.get("pull_request")
+        if isinstance(pull_request, dict):
+            head = pull_request.get("head")
+            if isinstance(head, dict):
+                ref = head.get("ref")
+                if ref:
+                    return ref
+
+        ref_name = os.getenv("GITHUB_REF_NAME")
+        if ref_name:
+            return ref_name
+
+        ref = os.getenv("GITHUB_REF")
+        if ref and ref.startswith("refs/heads/"):
+            return ref[len("refs/heads/") :]
+        return None
+
+    def _github_commit_from_event(self, event_payload: Dict[str, Any]) -> Optional[str]:
+        pull_request = event_payload.get("pull_request")
+        if isinstance(pull_request, dict):
+            head = pull_request.get("head")
+            if isinstance(head, dict):
+                sha = head.get("sha")
+                if sha:
+                    return sha
+
+        sha = os.getenv("GITHUB_SHA")
+        if sha:
+            return sha
+        return None
+
+    def _github_repo_name_from_event(
+        self, event_payload: Dict[str, Any]
+    ) -> Optional[str]:
+        pull_request = event_payload.get("pull_request")
+        if isinstance(pull_request, dict):
+            head = pull_request.get("head")
+            if isinstance(head, dict):
+                head_repo = head.get("repo")
+                if isinstance(head_repo, dict):
+                    name = head_repo.get("full_name") or head_repo.get("name")
+                    if name:
+                        return name
+
+        repository = event_payload.get("repository")
+        if isinstance(repository, dict):
+            name = repository.get("full_name") or repository.get("name")
+            if name:
+                return name
+
+        return os.getenv("GITHUB_REPOSITORY")
+
+    def _inject_github_token(self, repo_url: Optional[str]) -> Optional[str]:
+        if not repo_url:
+            return None
+
+        token = os.getenv("FULL_AUTO_CI_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        if not token:
+            return repo_url
+
+        parsed = urllib.parse.urlparse(repo_url)
+        if parsed.scheme not in {"http", "https"}:
+            return repo_url
+        if parsed.username:
+            return repo_url
+
+        auth_netloc = f"x-access-token:{token}@{parsed.netloc}"
+        return urllib.parse.urlunparse(parsed._replace(netloc=auth_netloc))
+
+    @staticmethod
+    def _strip_url_credentials(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return url
+
+        parsed = urllib.parse.urlparse(url)
+        if not parsed.netloc:
+            return url
+
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return url
+
+        netloc = hostname
+        if parsed.port:
+            netloc = f"{hostname}:{parsed.port}"
+
+        return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
     def _handle_repo_command(self, args: argparse.Namespace) -> int:
         """Handle repository commands.

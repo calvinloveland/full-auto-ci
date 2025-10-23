@@ -540,11 +540,15 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
     ) -> Dict[str, Any]:
         logger.error("Test run failed with return code %s", run_ctx.returncode)
         if getattr(run_ctx, "timed_out", False):
-            message = run_ctx.stderr or (
+            base_message = (
                 f"Coverage test run timed out after {self.timeout} seconds"
                 if self.timeout
                 else "Coverage test run timed out"
             )
+            if run_ctx.stderr:
+                message = f"{base_message}: {run_ctx.stderr}"
+            else:
+                message = base_message
         else:
             message = f"Test run failed with return code {run_ctx.returncode}"
 
@@ -568,11 +572,15 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
             xml_ctx.returncode,
         )
         if getattr(xml_ctx, "timed_out", False):
-            message = xml_ctx.stderr or (
+            base_message = (
                 f"Coverage XML generation timed out after {self.xml_timeout} seconds"
                 if self.xml_timeout
                 else "Coverage XML generation timed out"
             )
+            if xml_ctx.stderr:
+                message = f"{base_message}: {xml_ctx.stderr}"
+            else:
+                message = base_message
         else:
             message = (
                 "Coverage XML generation failed with return code "

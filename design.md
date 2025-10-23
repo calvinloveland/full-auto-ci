@@ -17,6 +17,7 @@ Full Auto CI consists of two main components:
 - Pulls down the latest code automatically
 - Runs configured tests and tools in isolated environments
 - Stores test results and history in a database
+- Enforces per-tool ratchets so quality gates tighten as teams approach their targets
 - Provides a REST API for accessing results and configuration
 - Scales via multiprocessing to handle multiple commits and tools concurrently
 

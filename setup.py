@@ -12,6 +12,7 @@ setup(
         "pylint>=2.8.0",
         "coverage>=5.5",
         "pytest>=6.2.5",
+        "lizard>=1.17.10",
     ],
     extras_require={
         "api": [

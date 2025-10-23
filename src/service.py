@@ -17,6 +17,7 @@ from .db import DataAccess
 from .git import GitTracker
 from .providers import BaseProvider, ProviderConfigError
 from .providers import registry as provider_registry
+from .ratchet import RatchetManager
 from .tools import Coverage, Lizard, Pylint, Tool, ToolRunner
 
 # Configure logging
@@ -43,6 +44,7 @@ class ServiceComponents:
     git_tracker: GitTracker
     tool_runner: ToolRunner
     data: DataAccess
+    ratchet: RatchetManager
 
 
 class CIService:
@@ -65,10 +67,12 @@ class CIService:
         )
         self._runtime = ServiceRuntime()
         self._component_overrides: Dict[str, Any] = {}
+        data_access = DataAccess(self.db_path)
         self._components = ServiceComponents(
             git_tracker=GitTracker(db_path=self.db_path),
             tool_runner=self._build_tool_runner(),
-            data=DataAccess(self.db_path),
+            data=data_access,
+            ratchet=RatchetManager(data_access, self.config),
         )
         self.data.initialize_schema()
         self._bootstrap_dogfood_repository()
@@ -377,6 +381,24 @@ class CIService:
         """Reset the git tracker component override."""
 
         self._reset_component("git_tracker")
+
+    @property
+    def ratchet_manager(self) -> RatchetManager:
+        """Access the ratchet manager component."""
+
+        return self._components.ratchet
+
+    @ratchet_manager.setter
+    def ratchet_manager(self, value: RatchetManager) -> None:
+        """Override the ratchet manager component."""
+
+        self._set_component("ratchet", value)
+
+    @ratchet_manager.deleter
+    def ratchet_manager(self) -> None:
+        """Reset the ratchet manager component override."""
+
+        self._reset_component("ratchet")
 
     def _create_test_run(
         self, repo_id: int, commit_hash: str, status: str = "pending"
@@ -774,6 +796,17 @@ class CIService:
                 "Running tests for repository %s, commit %s", repo_id, commit_hash
             )
             results = self.tool_runner.run_all(repo.repo_path)
+            try:
+                self.ratchet_manager.apply(repo_id, results)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error("Ratchet evaluation failed: %s", exc)
+                for tool_result in results.values():
+                    if (
+                        isinstance(tool_result, dict)
+                        and tool_result.get("status") == "success"
+                    ):
+                        tool_result["status"] = "error"
+                        tool_result["error"] = f"Ratchet evaluation failed: {exc}"
             self._store_results(repo_id, commit_hash, results)
 
             overall_status, message = self._summarize_tool_results(results)

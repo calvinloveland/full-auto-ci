@@ -696,6 +696,49 @@ class DataAccess:
 
         return [self._hydrate_result_row(row) for row in rows]
 
+    def fetch_tool_history(
+        self,
+        repository_id: int,
+        tool: str,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return historical results for ``tool`` within ``repository_id``."""
+
+        query = [
+            "SELECT r.status, r.output, r.duration, r.created_at",
+            "FROM results r",
+            "JOIN commits c ON c.id = r.commit_id",
+            "WHERE c.repository_id = ? AND r.tool = ?",
+            "ORDER BY r.created_at ASC, r.id ASC",
+        ]
+
+        params: List[Any] = [repository_id, tool]
+        if limit and limit > 0:
+            query.append("LIMIT ?")
+            params.append(int(limit))
+
+        sql = " ".join(query)
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+        history: List[Dict[str, Any]] = []
+        for status, output_text, duration, created_at in rows:
+            parsed_output = self._parse_output_text(output_text)
+            history.append(
+                {
+                    "status": status,
+                    "output": output_text,
+                    "duration": duration,
+                    "created_at": created_at,
+                    "data": parsed_output,
+                }
+            )
+
+        return history
+
     @staticmethod
     def _hydrate_result_row(row: Tuple[Any, ...]) -> Dict[str, Any]:
         tool, status, output_text, duration, created_at = row
@@ -714,6 +757,16 @@ class DataAccess:
             "created_at": created_at,
             "data": parsed_output,
         }
+
+    @staticmethod
+    def _parse_output_text(output_text: Optional[str]) -> Optional[Any]:
+        if not output_text:
+            return None
+
+        try:
+            return json.loads(output_text)
+        except (TypeError, json.JSONDecodeError):
+            return None
 
     # User management helpers
 

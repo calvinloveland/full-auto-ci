@@ -42,6 +42,40 @@ mkdir -p ~/.fullautoci
 cp config.example.yml ~/.fullautoci/config.yml
 ```
 
+### Tool settings
+
+Test tooling is driven by the `tools` section. Each tool can be disabled or tuned without code changes:
+
+```yaml
+tools:
+	coverage:
+		enabled: true
+		run_tests_cmd: ["pytest"]  # override to customize the test runner
+		timeout_seconds: 300        # abort the coverage run command after 5 minutes
+		xml_timeout_seconds: 120    # abort `coverage xml` if report generation stalls
+		ratchet:
+			enabled: true
+			target: 90.0              # require at least 90% line coverage eventually
+			tolerance: 0.1            # (optional) allow small float variance
+	lizard:
+		enabled: true
+		max_ccn: 10                 # threshold for highlighting complex functions
+		ratchet:
+			enabled: true
+			target: 0.0               # drive towards zero over-threshold functions
+	pylint:
+		enabled: true
+		ratchet:
+			enabled: true
+			target: 9.5               # enforce a minimum pylint score
+```
+
+`timeout_seconds` and `xml_timeout_seconds` are especially helpful when running against large or flaky suites—timeouts surface as explicit tool errors instead of hanging the overall pipeline. Set `enabled: false` on any entry to skip that tool entirely.
+
+Ratchets let teams make incremental progress toward ambitious targets without blocking every run: when enabled, a tool run succeeds if it reaches the configured target or improves upon the repository's best historical result. Once the target is achieved, CI enforces it strictly—new commits must stay at or beyond the goal (for example, no reduction in coverage or increase in cyclomatic complexity).
+
+Each tool ships with sensible defaults for the tracked metric (`percentage` for coverage, `score` for Pylint, `summary.above_threshold` for Lizard) and the comparison direction (`higher` or `lower`). Override `metric`, `direction`, or `tolerance` inside the `ratchet` block if you need custom behavior.
+
 ## Usage
 
 ### CLI
@@ -89,6 +123,8 @@ Show stored test results (optionally filtered by commit):
 ```bash
 full-auto-ci test results <repo_id> [--commit <commit_hash>]
 ```
+
+Each run captures the outputs from the enabled tools (Pylint, Coverage, Lizard by default). The CLI surfaces summarized findings—coverage percentage and per-file stats, pylint issue counts, and the top complexity offenders reported by Lizard.
 
 ### REST API
 

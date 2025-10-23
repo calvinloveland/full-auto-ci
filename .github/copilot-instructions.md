@@ -7,7 +7,7 @@
 ## Key modules & flows
 - `CIService` wires `Config`, `GitTracker`, and `ToolRunner`. `start()` spins worker threads plus a monitor loop; `run_tests()` is the synchronous path the CLI uses.
 - `GitTracker` (`src/git.py`) persists repo metadata in SQLite and shells out to system `git` (`clone`, `pull`, `log`, `checkout`). Real network access happens unless you patch `subprocess.run`.
-- `ToolRunner` runs `Pylint` and `Coverage` (`src/tools.py`) sequentially on the repo path. Coverage changes cwd, runs `coverage run -m pytest`, then `coverage xml` and parses `coverage.xml`.
+- `ToolRunner` instantiates the enabled tools from config and runs them sequentially. Current built-ins are `Pylint`, `Coverage`, and `Lizard`. Coverage changes cwd, runs `coverage run -m pytest`, then `coverage xml` (with configurable timeouts) and parses `coverage.xml`; Lizard reports cyclomatic complexity using either the Python API or CLI fallback.
 
 ## Data layout & persistence
 - SQLite file defaults to `~/.fullautoci/database.sqlite`; `CIService._setup_database()` creates `repositories`, `commits`, `results`, `users` tables only.
@@ -30,7 +30,8 @@
 
 ## Configuration conventions
 - Config loads from `~/.fullautoci/config.yml`; copy `config.example.yml` for defaults. `Config.get(section, key)` falls back to the in-memory defaults defined in `src/config.py`.
-- Tool configs accept overrides via YAML (`tools.pylint.config_file`, `tools.coverage.run_tests_cmd`) but the concrete runners currently ignore these values.
+- The `tools` section controls which analyzers run. Set `enabled: false` to skip a tool, override `coverage.run_tests_cmd` to customize the underlying test command, and tune `coverage.timeout_seconds` / `coverage.xml_timeout_seconds` to prevent long-running subprocess hangs. `lizard.max_ccn` sets the cyclomatic complexity threshold used for highlighting offenders.
+- Per-tool ratchets live under `tools.<name>.ratchet`: when enabled they evaluate the tool's metric (coverage percentage, pylint score, or Lizard's `summary.above_threshold`) against a target. Runs pass while they improve on the repository's best historical value and become strict once the target is reached.
 
 ## Known gaps & cautions
 - Service/database schema drift: align DB migrations manually before extending API/webhook functionality.

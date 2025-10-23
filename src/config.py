@@ -43,16 +43,37 @@ class Config:
             "pylint": {
                 "enabled": True,
                 "config_file": None,  # Use default pylintrc
+                "ratchet": {
+                    "enabled": False,
+                    "metric": "score",
+                    "direction": "higher",
+                    "target": 10.0,
+                    "tolerance": 0.0,
+                },
             },
             "coverage": {
                 "enabled": True,
                 "run_tests_cmd": ["pytest"],
                 "timeout_seconds": 300,
                 "xml_timeout_seconds": 120,
+                "ratchet": {
+                    "enabled": False,
+                    "metric": "percentage",
+                    "direction": "higher",
+                    "target": 90.0,
+                    "tolerance": 0.0,
+                },
             },
             "lizard": {
                 "enabled": True,
                 "max_ccn": 10,
+                "ratchet": {
+                    "enabled": False,
+                    "metric": "summary.above_threshold",
+                    "direction": "lower",
+                    "target": 0.0,
+                    "tolerance": 0.0,
+                },
             },
         },
         "dogfood": {
