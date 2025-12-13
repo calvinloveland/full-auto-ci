@@ -248,22 +248,9 @@ class WebhookHandler:
             Dictionary with commit information or None if not a push event
         """
         try:
-            event_type = headers.get("X-Event-Key")
-            if event_type != "repo:push":
-                self._abort(logging.INFO, "Ignoring Bitbucket event: %s", event_type)
+            self._verify_bitbucket_event(headers)
 
-            repository = payload.get("repository", {})
-            repo_url = repository.get("links", {}).get("html", {}).get("href")
-            if not repository.get("full_name") or not repo_url:
-                self._abort(
-                    logging.WARNING,
-                    "Missing repository information in Bitbucket webhook",
-                )
-
-            if repo_url.endswith("/"):
-                repo_url = repo_url[:-1]
-            repo_url = f"{repo_url}.git"
-
+            repo_url = self._bitbucket_repo_url(payload)
             repo_id = self._get_repo_id_by_url(repo_url)
             if not repo_id:
                 self._abort(
@@ -272,15 +259,7 @@ class WebhookHandler:
                     repo_url,
                 )
 
-            changes = payload.get("push", {}).get("changes") or []
-            if not changes:
-                self._abort(logging.INFO, "No changes in Bitbucket push event")
-
-            commits = changes[0].get("commits") or []
-            if not commits:
-                self._abort(logging.INFO, "No commits in Bitbucket push event")
-
-            commit = commits[-1]
+            commit = self._bitbucket_latest_commit(payload)
             timestamp_raw = commit.get("date")
             if not timestamp_raw:
                 self._abort(
@@ -288,9 +267,7 @@ class WebhookHandler:
                 )
 
             timestamp = self._parse_iso_timestamp(timestamp_raw)
-            author_email = commit.get("author", {}).get("raw")
-            if author_email:
-                author_email = author_email.split("<")[-1].split(">")[0]
+            author_email = self._bitbucket_author_email(commit)
 
             return {
                 "provider": "bitbucket",
@@ -304,6 +281,42 @@ class WebhookHandler:
             }
         except _WebhookAbort:
             return None
+
+    def _verify_bitbucket_event(self, headers: Dict[str, str]) -> None:
+        event_type = headers.get("X-Event-Key")
+        if event_type != "repo:push":
+            self._abort(logging.INFO, "Ignoring Bitbucket event: %s", event_type)
+
+    def _bitbucket_repo_url(self, payload: Dict[str, Any]) -> str:
+        repository = payload.get("repository", {})
+        repo_url = repository.get("links", {}).get("html", {}).get("href")
+        if not repository.get("full_name") or not repo_url:
+            self._abort(
+                logging.WARNING,
+                "Missing repository information in Bitbucket webhook",
+            )
+
+        repo_url = repo_url[:-1] if repo_url.endswith("/") else repo_url
+        return f"{repo_url}.git"
+
+    def _bitbucket_latest_commit(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        changes = payload.get("push", {}).get("changes") or []
+        if not changes:
+            self._abort(logging.INFO, "No changes in Bitbucket push event")
+
+        commits = changes[0].get("commits") or []
+        if not commits:
+            self._abort(logging.INFO, "No commits in Bitbucket push event")
+
+        commit = commits[-1]
+        return commit if isinstance(commit, dict) else {}
+
+    @staticmethod
+    def _bitbucket_author_email(commit: Dict[str, Any]) -> Optional[str]:
+        author_email = commit.get("author", {}).get("raw")
+        if not author_email:
+            return None
+        return author_email.split("<")[-1].split(">")[0]
 
     def _get_repo_id_by_url(self, url: str) -> Optional[int]:
         """Get repository ID by URL.

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence
 
@@ -47,6 +48,9 @@ def serve(
     host = getattr(args, "host", "127.0.0.1")
     port = getattr(args, "port", 8765)
     token_state = "enabled" if token else "disabled"
+
+    if getattr(args, "stdio", False) and print_fn is print:
+        print_fn = lambda message: print(message, file=sys.stderr, flush=True)
 
     if getattr(args, "stdio", False):
         print_fn(f"Starting MCP server on stdio (token={token_state})")
@@ -147,85 +151,80 @@ def _prepare_mcp_tcp_launch(
 
 
 def _probe_mcp_server(host: str, port: int, token: Optional[str]) -> Optional[str]:
-    try:
-        with socket.create_connection((host, port), timeout=1.0) as sock:
-            params: Dict[str, Any] = {}
-            if token:
-                params["token"] = token
-            message = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "handshake",
-                "params": params,
-            }
-            sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
-            sock.settimeout(1.0)
-            buffer = b""
-            while not buffer.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-    except (OSError, ValueError):
+    response = _send_mcp_request(host, port, token, method="handshake", timeout=1.0)
+    if response is None:
         return None
-
-    if not buffer:
-        return None
-
-    try:
-        response = json.loads(buffer.decode("utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-    if isinstance(response, dict) and "result" in response:
+    if "result" in response:
         return "available"
-
-    error = response.get("error") if isinstance(response, dict) else None
-    if isinstance(error, dict) and error.get("code") == -32604:
+    if _is_unauthorized(response):
         return "unauthorized"
-
     return None
 
 
 def _request_mcp_shutdown(host: str, port: int, token: Optional[str]) -> str:
+    response = _send_mcp_request(host, port, token, method="shutdown", timeout=2.0)
+    if response is None:
+        return "unreachable"
+    if "result" in response:
+        return "success"
+    if _is_unauthorized(response):
+        return "unauthorized"
+    return "failure"
+
+
+def _send_mcp_request(
+    host: str,
+    port: int,
+    token: Optional[str],
+    *,
+    method: str,
+    timeout: float,
+) -> Optional[Dict[str, Any]]:
     try:
         with socket.create_connection((host, port), timeout=1.0) as sock:
-            params: Dict[str, Any] = {}
-            if token:
-                params["token"] = token
-            message = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "shutdown",
-                "params": params,
-            }
+            message = _mcp_message(method, token)
             sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
-            sock.settimeout(2.0)
-            buffer = b""
-            while not buffer.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
+            buffer = _read_line(sock, timeout=timeout)
     except (OSError, ValueError):
-        return "unreachable"
+        return None
 
     if not buffer:
-        return "failure"
+        return None
 
     try:
         response = json.loads(buffer.decode("utf-8"))
     except json.JSONDecodeError:
-        return "failure"
+        return None
 
-    if isinstance(response, dict):
-        if "result" in response:
-            return "success"
-        error = response.get("error")
-        if isinstance(error, dict) and error.get("code") == -32604:
-            return "unauthorized"
+    return response if isinstance(response, dict) else None
 
-    return "failure"
+
+def _mcp_message(method: str, token: Optional[str]) -> Dict[str, Any]:
+    params: Dict[str, Any] = {}
+    if token:
+        params["token"] = token
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }
+
+
+def _read_line(sock: socket.socket, *, timeout: float) -> bytes:
+    sock.settimeout(timeout)
+    buffer = b""
+    while not buffer.endswith(b"\n"):
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buffer += chunk
+    return buffer
+
+
+def _is_unauthorized(response: Dict[str, Any]) -> bool:
+    error = response.get("error")
+    return isinstance(error, dict) and error.get("code") == -32604
 
 
 def _wait_for_mcp_shutdown(

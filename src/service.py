@@ -841,67 +841,94 @@ class CIService:
             results: Test results
         """
         try:
-            commit_id = self.data.get_commit_id(repo_id, commit_hash)
+            commit_id = self._ensure_commit_id(repo_id, commit_hash)
             if commit_id is None:
-                logger.warning(
-                    "Commit %s not found in database, creating placeholder entry",
-                    commit_hash,
-                )
-                commit_id = self.data.create_commit(
-                    repo_id,
-                    commit_hash,
-                    timestamp=int(time.time()),
-                )
+                return
 
             for tool_name, tool_result in results.items():
-                if tool_result is None:
-                    continue
-
-                payload = dict(tool_result)
-                embedded_results = payload.pop("embedded_results", None)
-                status = payload.get("status", "unknown")
-                duration = float(payload.get("duration", 0.0) or 0.0)
-
-                output = json.dumps(payload)
-                self.data.insert_result(
-                    commit_id,
-                    tool=tool_name,
-                    status=status,
-                    output=output,
-                    duration=duration,
-                )
-
-                if embedded_results:
-                    for embedded in embedded_results:
-                        if not isinstance(embedded, dict):
-                            continue
-
-                        embedded_tool = embedded.get("tool")
-                        if not embedded_tool:
-                            continue
-
-                        embedded_status = embedded.get("status", "unknown")
-                        embedded_duration = float(embedded.get("duration", 0.0) or 0.0)
-                        embedded_output = embedded.get("output")
-
-                        if isinstance(embedded_output, str):
-                            output_text = embedded_output
-                        else:
-                            output_text = json.dumps(embedded_output or {})
-
-                        self.data.insert_result(
-                            commit_id,
-                            tool=str(embedded_tool),
-                            status=str(embedded_status),
-                            output=output_text,
-                            duration=embedded_duration,
-                        )
+                self._store_tool_result(commit_id, tool_name, tool_result)
 
             logger.info("Stored test results for commit %s", commit_hash)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
                 "Error storing test results for commit %s: %s", commit_hash, exc
             )
+
+    def _ensure_commit_id(self, repo_id: int, commit_hash: str) -> Optional[int]:
+        commit_id = self.data.get_commit_id(repo_id, commit_hash)
+        if commit_id is not None:
+            return commit_id
+
+        logger.warning(
+            "Commit %s not found in database, creating placeholder entry",
+            commit_hash,
+        )
+        return self.data.create_commit(
+            repo_id,
+            commit_hash,
+            timestamp=int(time.time()),
+        )
+
+    def _store_tool_result(
+        self,
+        commit_id: int,
+        tool_name: str,
+        tool_result: Any,
+    ) -> None:
+        if tool_result is None:
+            return
+
+        payload = dict(tool_result)
+        embedded_results = payload.pop("embedded_results", None)
+        status = payload.get("status", "unknown")
+        duration = float(payload.get("duration", 0.0) or 0.0)
+
+        self.data.insert_result(
+            commit_id,
+            tool=tool_name,
+            status=status,
+            output=json.dumps(payload),
+            duration=duration,
+        )
+
+        self._store_embedded_results(commit_id, embedded_results)
+
+    def _store_embedded_results(self, commit_id: int, embedded_results: Any) -> None:
+        if not embedded_results:
+            return
+        if not isinstance(embedded_results, list):
+            return
+
+        for embedded in embedded_results:
+            stored = self._coerce_embedded_result(embedded)
+            if stored is None:
+                continue
+            self.data.insert_result(commit_id, **stored)
+
+    @staticmethod
+    def _coerce_embedded_result(embedded: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(embedded, dict):
+            return None
+
+        embedded_tool = embedded.get("tool")
+        if not embedded_tool:
+            return None
+
+        embedded_status = embedded.get("status", "unknown")
+        embedded_duration = float(embedded.get("duration", 0.0) or 0.0)
+        embedded_output = embedded.get("output")
+
+        if isinstance(embedded_output, str):
+            output_text = embedded_output
+        else:
+            output_text = json.dumps(embedded_output or {})
+
+        return {
+            "tool": str(embedded_tool),
+            "status": str(embedded_status),
+            "output": output_text,
+            "duration": embedded_duration,
+        }
 
     def _monitor_repositories(self):
         """Monitor repositories for new commits."""
@@ -949,27 +976,43 @@ class CIService:
             logger.error("Repository %s not found", repo_id)
             return {"status": "error", "error": f"Repository {repo_id} not found"}
 
-        warnings: List[str] = []
-
-        if self._has_local_changes(getattr(repo, "url", "")):
-            warning = (
-                "Uncommitted changes detected in the source repository; "
-                "only committed files are included in this run."
-            )
-            logger.warning(
-                "%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", "")
-            )
-            warnings.append(warning)
-
+        warnings = self._collect_local_change_warnings(repo, repo_id)
         test_run_id = self._create_test_run(repo_id, commit_hash)
         self._update_test_run(test_run_id, "running")
 
-        if not os.path.exists(repo.repo_path):
-            if not repo.clone():
-                error_msg = f"Failed to clone repository {repo_id}"
-                logger.error(error_msg)
-                self._update_test_run(test_run_id, "error", error_msg)
-                return {"status": "error", "error": error_msg}
+        early_error = self._prepare_repo_for_run(
+            repo, repo_id, commit_hash, test_run_id
+        )
+        if early_error is not None:
+            return early_error
+
+        return self._execute_tool_run(repo_id, commit_hash, repo, test_run_id, warnings)
+
+    def _collect_local_change_warnings(self, repo: Any, repo_id: int) -> List[str]:
+        warnings: List[str] = []
+        if not self._has_local_changes(getattr(repo, "url", "")):
+            return warnings
+
+        warning = (
+            "Uncommitted changes detected in the source repository; "
+            "only committed files are included in this run."
+        )
+        logger.warning("%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", ""))
+        warnings.append(warning)
+        return warnings
+
+    def _prepare_repo_for_run(
+        self,
+        repo: Any,
+        repo_id: int,
+        commit_hash: str,
+        test_run_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(repo.repo_path) and not repo.clone():
+            error_msg = f"Failed to clone repository {repo_id}"
+            logger.error(error_msg)
+            self._update_test_run(test_run_id, "error", error_msg)
+            return {"status": "error", "error": error_msg}
 
         if not repo.checkout_commit(commit_hash):
             error_msg = f"Failed to checkout commit {commit_hash}"
@@ -977,6 +1020,16 @@ class CIService:
             self._update_test_run(test_run_id, "error", error_msg)
             return {"status": "error", "error": error_msg}
 
+        return None
+
+    def _execute_tool_run(
+        self,
+        repo_id: int,
+        commit_hash: str,
+        repo: Any,
+        test_run_id: int,
+        warnings: List[str],
+    ) -> Dict[str, Any]:
         try:
             logger.info(
                 "Running tools for repository %s, commit %s", repo_id, commit_hash
@@ -985,30 +1038,12 @@ class CIService:
             self._store_results(repo_id, commit_hash, results)
 
             overall_status, message = self._summarize_tool_results(results)
-            if overall_status == "success":
-                logger.info(
-                    "Tests completed for repository %s, commit %s", repo_id, commit_hash
-                )
-                self._update_test_run(test_run_id, "completed")
-            else:
-                logger.error(
-                    "Tool failures detected for repository %s, commit %s: %s",
-                    repo_id,
-                    commit_hash,
-                    message,
-                )
-                self._update_test_run(test_run_id, "error", message)
-
-            formatted_results = {
-                "status": "success" if overall_status == "success" else "error",
-                "tools": results,
-                "test_run_id": test_run_id,
-            }
-            if message:
-                formatted_results["error"] = message
-            if warnings:
-                formatted_results["warnings"] = warnings
-            return formatted_results
+            self._finalize_test_run(
+                test_run_id, repo_id, commit_hash, overall_status, message
+            )
+            return self._format_run_results(
+                overall_status, message, results, test_run_id, warnings
+            )
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
                 "Error running tests for repository %s, commit %s: %s",
@@ -1018,6 +1053,48 @@ class CIService:
             )
             self._update_test_run(test_run_id, "error", str(exc))
             return {"status": "error", "error": str(exc)}
+
+    def _finalize_test_run(
+        self,
+        test_run_id: int,
+        repo_id: int,
+        commit_hash: str,
+        overall_status: str,
+        message: Optional[str],
+    ) -> None:
+        if overall_status == "success":
+            logger.info(
+                "Tests completed for repository %s, commit %s", repo_id, commit_hash
+            )
+            self._update_test_run(test_run_id, "completed")
+            return
+
+        logger.error(
+            "Tool failures detected for repository %s, commit %s: %s",
+            repo_id,
+            commit_hash,
+            message,
+        )
+        self._update_test_run(test_run_id, "error", message)
+
+    @staticmethod
+    def _format_run_results(
+        overall_status: str,
+        message: Optional[str],
+        results: Dict[str, Any],
+        test_run_id: int,
+        warnings: List[str],
+    ) -> Dict[str, Any]:
+        formatted_results: Dict[str, Any] = {
+            "status": "success" if overall_status == "success" else "error",
+            "tools": results,
+            "test_run_id": test_run_id,
+        }
+        if message:
+            formatted_results["error"] = message
+        if warnings:
+            formatted_results["warnings"] = warnings
+        return formatted_results
 
     def add_repository(self, name: str, url: str, branch: str = "main") -> int:
         """Add a repository to monitor.

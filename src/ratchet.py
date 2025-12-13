@@ -93,19 +93,8 @@ class RatchetManager:
     # Rule resolution
     # ------------------------------------------------------------------
     def _build_rule(self, tool_name: str) -> Optional[RatchetRule]:
-        tools_config = self._config.get("tools") or {}
-        tool_config = (
-            tools_config.get(tool_name, {}) if isinstance(tools_config, dict) else {}
-        )
-
-        ratchet_config = (
-            tool_config.get("ratchet") if isinstance(tool_config, dict) else None
-        )
-        if not isinstance(ratchet_config, dict):
-            ratchet_config = {}
-
-        enabled_value = ratchet_config.get("enabled")
-        if not self._coerce_bool(enabled_value):
+        ratchet_config = self._ratchet_config(tool_name)
+        if not self._coerce_bool(ratchet_config.get("enabled")):
             return None
 
         defaults = self.DEFAULT_RULES.get(
@@ -113,18 +102,57 @@ class RatchetManager:
         )
 
         metric = ratchet_config.get("metric") or defaults.metric
+        direction = self._ratchet_direction(tool_name, ratchet_config, defaults)
+
+        target_value = self._ratchet_target(tool_name, ratchet_config, defaults)
+        if target_value is None:
+            return None
+
+        tolerance_value = self._ratchet_tolerance(ratchet_config, defaults)
+
+        return RatchetRule(
+            metric=str(metric),
+            direction=direction,
+            target=target_value,
+            tolerance=tolerance_value,
+        )
+
+    def _ratchet_config(self, tool_name: str) -> Dict[str, Any]:
+        tools_config = self._config.get("tools") or {}
+        tool_config = (
+            tools_config.get(tool_name, {}) if isinstance(tools_config, dict) else {}
+        )
+        ratchet_config = (
+            tool_config.get("ratchet") if isinstance(tool_config, dict) else None
+        )
+        return ratchet_config if isinstance(ratchet_config, dict) else {}
+
+    def _ratchet_direction(
+        self,
+        tool_name: str,
+        ratchet_config: Dict[str, Any],
+        defaults: RatchetRule,
+    ) -> str:
         direction_raw = (
             ratchet_config.get("direction") or defaults.direction or "higher"
         ).lower()
-        if direction_raw not in {"higher", "lower"}:
-            logger.warning(
-                "Invalid ratchet direction '%s' for %s; defaulting to %s",
-                direction_raw,
-                tool_name,
-                defaults.direction,
-            )
-            direction_raw = defaults.direction
+        if direction_raw in {"higher", "lower"}:
+            return direction_raw
 
+        logger.warning(
+            "Invalid ratchet direction '%s' for %s; defaulting to %s",
+            direction_raw,
+            tool_name,
+            defaults.direction,
+        )
+        return defaults.direction
+
+    def _ratchet_target(
+        self,
+        tool_name: str,
+        ratchet_config: Dict[str, Any],
+        defaults: RatchetRule,
+    ) -> Optional[float]:
         target = ratchet_config.get("target", defaults.target)
         target_value = self._coerce_float(target)
         if target_value is None:
@@ -133,19 +161,17 @@ class RatchetManager:
                 tool_name,
             )
             return None
+        return target_value
 
+    def _ratchet_tolerance(
+        self,
+        ratchet_config: Dict[str, Any],
+        defaults: RatchetRule,
+    ) -> float:
         tolerance_value = self._coerce_float(
             ratchet_config.get("tolerance", defaults.tolerance)
         )
-        if tolerance_value is None:
-            tolerance_value = defaults.tolerance
-
-        return RatchetRule(
-            metric=metric,
-            direction=direction_raw,
-            target=target_value,
-            tolerance=tolerance_value,
-        )
+        return tolerance_value if tolerance_value is not None else defaults.tolerance
 
     # ------------------------------------------------------------------
     # Evaluation helpers

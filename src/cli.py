@@ -331,41 +331,62 @@ class CLI:
     def _resolve_dogfood_context(self, args: argparse.Namespace) -> Dict[str, Any]:
         event_payload = self._load_github_event()
 
-        repo_url = args.repo_url or os.getenv("FULL_AUTO_CI_REPO_URL")
-        if not repo_url:
-            repo_url = self._github_repo_url_from_event(event_payload)
-
-        branch = args.branch or os.getenv("FULL_AUTO_CI_REPO_BRANCH")
-        if not branch:
-            branch = self._github_branch_from_event(event_payload)
-
-        commit = (
-            args.commit
-            or os.getenv("FULL_AUTO_CI_COMMIT")
-            or os.getenv("FULL_AUTO_CI_COMMIT_HASH")
-        )
-        if not commit:
-            commit = self._github_commit_from_event(event_payload)
-
-        name = args.name or os.getenv("FULL_AUTO_CI_REPO_NAME")
-        if not name:
-            name = self._github_repo_name_from_event(event_payload)
-
-        raw_repo_url = repo_url
-        repo_url = self._inject_github_token(repo_url) if repo_url else None
-        display_name = name or self._strip_url_credentials(raw_repo_url) or "repository"
-
-        db_path = args.db_path or os.getenv("FULL_AUTO_CI_DB_PATH")
-        if not db_path:
-            db_path = getattr(self.service, "db_path", None)
+        raw_repo_url = self._dogfood_repo_url(args, event_payload)
+        branch = self._dogfood_branch(args, event_payload)
+        commit = self._dogfood_commit(args, event_payload)
+        display_name = self._dogfood_display_name(args, event_payload, raw_repo_url)
+        repo_url = self._inject_github_token(raw_repo_url) if raw_repo_url else None
 
         return {
             "url": repo_url,
-            "branch": branch or "main",
+            "branch": branch,
             "commit": commit,
             "name": display_name,
-            "db_path": db_path,
+            "db_path": self._dogfood_db_path(args),
         }
+
+    def _dogfood_repo_url(
+        self, args: argparse.Namespace, event_payload: Dict[str, Any]
+    ) -> Optional[str]:
+        repo_url = args.repo_url or os.getenv("FULL_AUTO_CI_REPO_URL")
+        if repo_url:
+            return repo_url
+        return self._github_repo_url_from_event(event_payload)
+
+    def _dogfood_branch(
+        self, args: argparse.Namespace, event_payload: Dict[str, Any]
+    ) -> str:
+        branch = args.branch or os.getenv("FULL_AUTO_CI_REPO_BRANCH")
+        if not branch:
+            branch = self._github_branch_from_event(event_payload)
+        return branch or "main"
+
+    def _dogfood_commit(
+        self, args: argparse.Namespace, event_payload: Dict[str, Any]
+    ) -> Optional[str]:
+        commit = args.commit or os.getenv("FULL_AUTO_CI_COMMIT")
+        if not commit:
+            commit = os.getenv("FULL_AUTO_CI_COMMIT_HASH")
+        if not commit:
+            commit = self._github_commit_from_event(event_payload)
+        return commit
+
+    def _dogfood_display_name(
+        self,
+        args: argparse.Namespace,
+        event_payload: Dict[str, Any],
+        raw_repo_url: Optional[str],
+    ) -> str:
+        name = args.name or os.getenv("FULL_AUTO_CI_REPO_NAME")
+        if not name:
+            name = self._github_repo_name_from_event(event_payload)
+        return name or self._strip_url_credentials(raw_repo_url) or "repository"
+
+    def _dogfood_db_path(self, args: argparse.Namespace) -> Optional[str]:
+        db_path = args.db_path or os.getenv("FULL_AUTO_CI_DB_PATH")
+        if db_path:
+            return db_path
+        return getattr(self.service, "db_path", None)
 
     def _ensure_dogfood_repository(
         self, service: CIService, context: Dict[str, Any]
@@ -1018,6 +1039,23 @@ class CLI:
     def _summarize_tool_output(
         raw_output: Optional[str], result_status: Optional[str] = None
     ) -> Optional[str]:
+        payload = CLI._parse_tool_payload(raw_output)
+        if not payload:
+            return None
+
+        extras: List[str] = []
+        extras.extend(CLI._tool_status_extra(payload, result_status))
+        extras.extend(CLI._tool_score_extra(payload))
+        extras.extend(CLI._tool_percentage_extra(payload))
+        extras.extend(CLI._tool_summary_extras(payload))
+
+        if not extras:
+            extras.extend(CLI._tool_details_extra(payload))
+
+        return ", ".join(extras) if extras else None
+
+    @staticmethod
+    def _parse_tool_payload(raw_output: Optional[str]) -> Optional[Dict[str, Any]]:
         if not raw_output:
             return None
 
@@ -1026,54 +1064,63 @@ class CLI:
         except (TypeError, json.JSONDecodeError):
             return None
 
-        if not isinstance(payload, dict):
-            return None
+        return payload if isinstance(payload, dict) else None
 
-        extras: List[str] = []
-
+    @staticmethod
+    def _tool_status_extra(
+        payload: Dict[str, Any], result_status: Optional[str]
+    ) -> List[str]:
         status = payload.get("status")
         if status and status != result_status:
-            extras.append(str(status))
+            return [str(status)]
+        return []
 
+    @staticmethod
+    def _tool_score_extra(payload: Dict[str, Any]) -> List[str]:
         score = payload.get("score")
         if isinstance(score, (int, float)):
-            extras.append(f"score {score:g}")
+            return [f"score {score:g}"]
+        return []
 
+    @staticmethod
+    def _tool_percentage_extra(payload: Dict[str, Any]) -> List[str]:
         percentage = payload.get("percentage")
         if isinstance(percentage, (int, float)):
-            extras.append(f"{percentage:.2f}%")
+            return [f"{percentage:.2f}%"]
+        return []
 
+    @staticmethod
+    def _tool_summary_extras(payload: Dict[str, Any]) -> List[str]:
         summary = payload.get("summary")
-        if isinstance(summary, dict):
-            avg_ccn = summary.get("average_ccn")
-            if isinstance(avg_ccn, (int, float)):
-                extras.append(f"avg CCN {avg_ccn:.2f}")
+        if not isinstance(summary, dict):
+            return []
 
-            max_ccn = summary.get("max_ccn")
-            if isinstance(max_ccn, (int, float)):
-                extras.append(f"max {max_ccn:g}")
+        extras: List[str] = []
+        avg_ccn = summary.get("average_ccn")
+        if isinstance(avg_ccn, (int, float)):
+            extras.append(f"avg CCN {avg_ccn:.2f}")
 
-            threshold = summary.get("threshold")
-            above = summary.get("above_threshold")
-            if (
-                isinstance(threshold, (int, float))
-                and isinstance(above, int)
-                and above > 0
-            ):
-                extras.append(f">{threshold:g} in {above}")
+        max_ccn = summary.get("max_ccn")
+        if isinstance(max_ccn, (int, float)):
+            extras.append(f"max {max_ccn:g}")
 
-        # Provide a single detail message if available when no other extras
-        if not extras:
-            details = payload.get("details")
-            if isinstance(details, list) and details:
-                first_detail = details[0]
-                if isinstance(first_detail, dict) and first_detail.get("message"):
-                    extras.append(first_detail["message"])
+        threshold = summary.get("threshold")
+        above = summary.get("above_threshold")
+        if isinstance(threshold, (int, float)) and isinstance(above, int) and above > 0:
+            extras.append(f">{threshold:g} in {above}")
 
-        if not extras:
-            return None
+        return extras
 
-        return ", ".join(str(item) for item in extras)
+    @staticmethod
+    def _tool_details_extra(payload: Dict[str, Any]) -> List[str]:
+        details = payload.get("details")
+        if not isinstance(details, list) or not details:
+            return []
+
+        first_detail = details[0]
+        if isinstance(first_detail, dict) and first_detail.get("message"):
+            return [str(first_detail["message"])]
+        return []
 
     @staticmethod
     def _resolve_log_level(value: str) -> int:

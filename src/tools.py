@@ -725,80 +725,123 @@ class Lizard(Tool):  # pylint: disable=too-few-public-methods
         return functions
 
     def _parse_xml_output(self, repo_path: str, xml_text: str) -> List[Dict[str, Any]]:
-        if not xml_text or not xml_text.strip():
-            return []
-
-        root = ET.fromstring(xml_text)
-        measure = root.find(".//measure[@type='Function']")
+        measure = self._xml_function_measure(xml_text)
         if measure is None:
             return []
 
-        label_elements = measure.find("labels")
-        labels = [
-            (label.text or "").strip()
-            for label in (
-                label_elements.findall("label") if label_elements is not None else []
-            )
-        ]
-
+        labels = self._xml_measure_labels(measure)
         functions: List[Dict[str, Any]] = []
         for item in measure.findall("item"):
-            values = [
-                value.text.strip() if value.text else ""
-                for value in item.findall("value")
-            ]
-            metrics = {label: value for label, value in zip(labels, values)}
-
-            name_attr = item.get("name", "")
-            func_name, filename, line = self._extract_location_from_cli_name(
-                repo_path, name_attr
-            )
-
-            ccn_value = metrics.get("CCN") or metrics.get("Ccn")
-            nloc_value = metrics.get("NCSS") or metrics.get("Ncss")
-
-            try:
-                ccn = float(ccn_value) if ccn_value else None
-            except ValueError:
-                ccn = None
-
-            try:
-                nloc = int(float(nloc_value)) if nloc_value else None
-            except ValueError:
-                nloc = None
-
-            if ccn is None:
-                continue
-
-            functions.append(
-                {
-                    "name": func_name,
-                    "filename": filename,
-                    "line": line,
-                    "ccn": ccn,
-                    "nloc": nloc,
-                }
-            )
-
+            parsed = self._parse_xml_function_item(repo_path, item, labels)
+            if parsed is not None:
+                functions.append(parsed)
         return functions
+
+    @staticmethod
+    def _xml_function_measure(xml_text: str) -> Optional[ET.Element]:
+        if not xml_text or not xml_text.strip():
+            return None
+
+        root = ET.fromstring(xml_text)
+        return root.find(".//measure[@type='Function']")
+
+    @staticmethod
+    def _xml_measure_labels(measure: ET.Element) -> List[str]:
+        label_elements = measure.find("labels")
+        labels = label_elements.findall("label") if label_elements is not None else []
+        return [(label.text or "").strip() for label in labels]
+
+    @staticmethod
+    def _safe_float(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _safe_int(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+
+    def _parse_xml_function_item(
+        self, repo_path: str, item: ET.Element, labels: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        values = [
+            value.text.strip() if value.text else "" for value in item.findall("value")
+        ]
+        metrics = {label: value for label, value in zip(labels, values)}
+
+        name_attr = item.get("name", "")
+        func_name, filename, line = self._extract_location_from_cli_name(
+            repo_path, name_attr
+        )
+
+        ccn_value = metrics.get("CCN") or metrics.get("Ccn")
+        nloc_value = metrics.get("NCSS") or metrics.get("Ncss")
+
+        ccn = self._safe_float(ccn_value)
+        if ccn is None:
+            return None
+
+        return {
+            "name": func_name,
+            "filename": filename,
+            "line": line,
+            "ccn": ccn,
+            "nloc": self._safe_int(nloc_value),
+        }
 
     def _build_result(
         self, functions: List[Dict[str, Any]], duration: float
     ) -> Dict[str, Any]:
-        ccn_values = [
-            entry["ccn"] for entry in functions if entry.get("ccn") is not None
-        ]
-        average_ccn = float(sum(ccn_values) / len(ccn_values)) if ccn_values else 0.0
-        max_ccn = max(ccn_values) if ccn_values else 0.0
+        ccn_values = self._ccn_values(functions)
+        offenders = self._lizard_offenders(functions)
 
+        result: Dict[str, Any] = {
+            "status": "success",
+            "summary": self._lizard_summary(functions, ccn_values, offenders),
+            "duration": duration,
+        }
+
+        top_offenders = self._top_offenders(offenders)
+        if top_offenders:
+            result["top_offenders"] = top_offenders
+
+        return result
+
+    @staticmethod
+    def _ccn_values(functions: List[Dict[str, Any]]) -> List[float]:
+        return [
+            float(entry["ccn"]) for entry in functions if entry.get("ccn") is not None
+        ]
+
+    def _lizard_offenders(
+        self, functions: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         offenders = [
             entry
             for entry in functions
-            if entry.get("ccn") is not None and entry["ccn"] > self.max_ccn
+            if entry.get("ccn") is not None and float(entry["ccn"]) > self.max_ccn
         ]
         offenders.sort(key=lambda item: item.get("ccn") or 0.0, reverse=True)
+        return offenders
 
-        summary = {
+    def _lizard_summary(
+        self,
+        functions: List[Dict[str, Any]],
+        ccn_values: List[float],
+        offenders: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        average_ccn = float(sum(ccn_values) / len(ccn_values)) if ccn_values else 0.0
+        max_ccn = max(ccn_values) if ccn_values else 0.0
+
+        return {
             "total_functions": len(functions),
             "files_analyzed": len(
                 {f["filename"] for f in functions if f.get("filename")}
@@ -809,25 +852,18 @@ class Lizard(Tool):  # pylint: disable=too-few-public-methods
             "above_threshold": len(offenders),
         }
 
-        result: Dict[str, Any] = {
-            "status": "success",
-            "summary": summary,
-            "duration": duration,
-        }
-
-        if offenders:
-            result["top_offenders"] = [
-                {
-                    "name": offender.get("name"),
-                    "filename": offender.get("filename"),
-                    "line": offender.get("line"),
-                    "ccn": offender.get("ccn"),
-                    "nloc": offender.get("nloc"),
-                }
-                for offender in offenders[:10]
-            ]
-
-        return result
+    @staticmethod
+    def _top_offenders(offenders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": offender.get("name"),
+                "filename": offender.get("filename"),
+                "line": offender.get("line"),
+                "ccn": offender.get("ccn"),
+                "nloc": offender.get("nloc"),
+            }
+            for offender in offenders[:10]
+        ]
 
     def _extract_location_from_cli_name(
         self, repo_path: str, cli_name: str

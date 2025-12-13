@@ -35,7 +35,14 @@ class DummyData:
                     "output": "All good",
                     "duration": 3.5,
                     "created_at": 1710000006,
-                }
+                },
+                {
+                    "tool": "coverage",
+                    "status": "success",
+                    "output": "95%",
+                    "duration": 4.2,
+                    "created_at": 1710000007,
+                },
             ]
         }
 
@@ -232,6 +239,71 @@ def test_initialize_handles_protocol_version_list(dummy_service):
     assert result["protocolVersion"] == "2024-12-06"
 
 
+def test_tools_list_exposes_full_auto_ci_tools(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message({"jsonrpc": "2.0", "id": 20, "method": "tools/list"})
+    )
+
+    tools = response["result"]["tools"]
+    assert isinstance(tools, list)
+    assert tools
+    names = {tool["name"] for tool in tools}
+    assert {
+        "listRepositories",
+        "addRepository",
+        "removeRepository",
+        "queueTestRun",
+        "getLatestResults",
+        "runTests",
+        "shutdown",
+    } <= names
+    assert all("inputSchema" in tool for tool in tools)
+
+
+def test_tools_call_returns_text_content(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {"name": "listRepositories", "arguments": {}},
+            }
+        )
+    )
+
+    result = response["result"]
+    assert "content" in result
+    assert result["content"][0]["type"] == "text"
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["repositories"] == dummy_service.repositories
+
+
+def test_tools_call_wraps_tool_failures_as_is_error(dummy_service):
+    dummy_service.run_tests_result = {"status": "failed", "tools": {}}
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "runTests",
+                    "arguments": {"repositoryId": 1, "commit": "abcdef1"},
+                },
+            }
+        )
+    )
+
+    result = response["result"]
+    assert result["isError"] is True
+    error_payload = json.loads(result["content"][0]["text"])["error"]
+    assert error_payload["code"] == -32004
+
+
 def test_initialize_defaults_missing_client_fields(dummy_service):
     server = MCPServer(dummy_service)
     response = _run(
@@ -394,6 +466,42 @@ def test_get_latest_results_enriches_runs(dummy_service):
     )
     runs = response["result"]["testRuns"]
     assert runs[0]["results"][0]["tool"] == "pylint"
+
+
+def test_get_latest_results_defaults_to_single_run_and_single_result(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 50,
+                "method": "getLatestResults",
+                "params": {"repositoryId": 1},
+            }
+        )
+    )
+
+    runs = response["result"]["testRuns"]
+    assert len(runs) == 1
+    assert len(runs[0]["results"]) == 1
+
+
+def test_get_latest_results_allows_multiple_results(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 51,
+                "method": "getLatestResults",
+                "params": {"repositoryId": 1, "limit": 1, "maxResults": 2},
+            }
+        )
+    )
+
+    runs = response["result"]["testRuns"]
+    assert len(runs) == 1
+    assert len(runs[0]["results"]) == 2
 
 
 def test_get_latest_results_allows_commit_filter(dummy_service):
@@ -596,7 +704,25 @@ def test_run_tests_returns_results(dummy_service):
     )
 
     assert response["result"]["status"] == "success"
+    assert len(response["result"]["results"]["tools"]) == 1
     assert dummy_service.run_tests_calls[-1] == (1, "abcdef1")
+
+
+def test_run_tests_allows_multiple_results(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 160,
+                "method": "runTests",
+                "params": {"repositoryId": 1, "commit": "abcdef1", "maxResults": 2},
+            }
+        )
+    )
+
+    assert response["result"]["status"] == "success"
+    assert len(response["result"]["results"]["tools"]) == 2
 
 
 def test_run_tests_failure_raises(dummy_service):

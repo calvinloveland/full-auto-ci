@@ -1,8 +1,10 @@
 {
     "servers": {
         "full-auto-ci": {
-            "command": "full-auto-ci",
+            "command": "python",
             "args": [
+                "-m",
+                "src.cli",
                 "mcp",
                 "serve",
                 "--stdio",

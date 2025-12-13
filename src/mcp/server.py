@@ -62,6 +62,7 @@ class MCPServer:
             "runTests": self._handle_run_tests,
             "logging/setLevel": self._handle_logging_set_level,
             "tools/list": self._handle_tools_list,
+            "tools/call": self._handle_tools_call,
             "prompts/list": self._handle_prompts_list,
             "shutdown": self._handle_shutdown,
         }
@@ -73,9 +74,38 @@ class MCPServer:
         require a response.
         """
 
-        logger.info("MCP request %s (id=%s)", message.get("method"), message.get("id"))
+        method, message_id, params, handler = self._validate_request(message)
+        logger.info("MCP request %s (id=%s)", method, message_id)
         logger.debug("MCP request payload: %s", message)
 
+        is_notification = message_id is None
+        if handler is None:
+            logger.debug("Ignoring unknown notification %s", method)
+            return None
+        if not is_notification:
+            self._verify_token(method, params)
+
+        result = await self._invoke_handler(method, handler, params)
+        if is_notification:
+            logger.debug("Notification %s handled without response", method)
+            return None
+
+        response = {"jsonrpc": "2.0", "id": message_id, "result": result}
+        logger.debug(
+            "MCP response payload for %s (id=%s): %s",
+            method,
+            message_id,
+            response,
+        )
+        logger.info("MCP response for %s (id=%s)", method, message_id)
+        return response
+
+    def _validate_request(self, message: Dict[str, Any]) -> tuple[
+        str,
+        Any,
+        Dict[str, Any],
+        Optional[Callable[[Dict[str, Any]], Awaitable[Any]]],
+    ]:
         if message.get("jsonrpc") != "2.0":
             raise MCPError(code=-32600, message="Invalid JSON-RPC version")
 
@@ -89,42 +119,28 @@ class MCPServer:
         handler = self._methods.get(method)
         if handler is None:
             if is_notification:
-                logger.debug("Ignoring unknown notification %s", method)
-                return None
+                return method, message_id, {}, None
             raise MCPError(code=-32601, message=f"Method not found: {method}")
 
         params = message.get("params") or {}
         if not isinstance(params, dict):
             raise MCPError(code=-32602, message="Params must be an object")
 
-        if not is_notification:
-            self._verify_token(method, params)
+        return method, message_id, params, handler
 
+    async def _invoke_handler(
+        self,
+        method: str,
+        handler: Callable[[Dict[str, Any]], Awaitable[Any]],
+        params: Dict[str, Any],
+    ) -> Any:
         try:
-            result = await handler(params)
+            return await handler(params)
         except MCPError:
             raise
         except Exception as exc:  # pylint: disable=broad-except
             logger.exception("Unhandled exception in MCP handler %s", method)
             raise MCPError(code=-32000, message=str(exc)) from exc
-
-        if is_notification:
-            logger.debug("Notification %s handled without response", method)
-            return None
-
-        response = {"jsonrpc": "2.0", "id": message_id, "result": result}
-        logger.debug(
-            "MCP response payload for %s (id=%s): %s",
-            method,
-            message.get("id"),
-            response,
-        )
-        logger.info(
-            "MCP response for %s (id=%s)",
-            method,
-            message.get("id"),
-        )
-        return response
 
     async def _handle_handshake(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         """Return the server identity and advertised capabilities."""
@@ -140,46 +156,11 @@ class MCPServer:
 
         logger.debug("Initialize request received with params: %s", params)
 
-        protocol_candidates: List[str] = []
-        requested_version = params.get("protocolVersion")
-        if isinstance(requested_version, str) and requested_version.strip():
-            protocol_candidates.append(requested_version.strip())
+        protocol_candidates = self._protocol_candidates(params)
+        negotiated_version = self._negotiate_protocol_version(protocol_candidates)
 
-        requested_versions = params.get("protocolVersions")
-        if isinstance(requested_versions, list):
-            protocol_candidates.extend(
-                version.strip()
-                for version in requested_versions
-                if isinstance(version, str) and version.strip()
-            )
-
-        negotiated_version: Optional[str] = None
-        for candidate in protocol_candidates:
-            if candidate in self._SUPPORTED_PROTOCOL_VERSIONS:
-                negotiated_version = candidate
-                break
-
-        if negotiated_version is None:
-            if protocol_candidates:
-                logger.warning(
-                    "Unsupported protocol requested: %s", protocol_candidates
-                )
-                raise MCPError(
-                    code=-32602,
-                    message="Unsupported protocol version",
-                    data={
-                        "supportedVersions": sorted(self._SUPPORTED_PROTOCOL_VERSIONS)
-                    },
-                )
-            negotiated_version = self._DEFAULT_PROTOCOL_VERSION
-
-        client_info = params.get("clientInfo")
-        if not isinstance(client_info, dict):
-            client_info = {}
-
-        capabilities = params.get("capabilities")
-        if not isinstance(capabilities, dict):
-            capabilities = {}
+        client_info = self._dict_param(params, "clientInfo")
+        capabilities = self._dict_param(params, "capabilities")
 
         self._session_id = uuid.uuid4().hex
 
@@ -195,7 +176,53 @@ class MCPServer:
             sorted(capabilities.keys()),
         )
 
-        response = {
+        response = self._initialize_response(negotiated_version)
+        logger.info(
+            "Completed initialize handshake (client=%s %s, protocol=%s)",
+            client_info.get("name"),
+            client_info.get("version"),
+            response["protocolVersion"],
+        )
+        return response
+
+    @staticmethod
+    def _dict_param(params: Dict[str, Any], key: str) -> Dict[str, Any]:
+        value = params.get(key)
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _protocol_candidates(params: Dict[str, Any]) -> List[str]:
+        candidates: List[str] = []
+        requested_version = params.get("protocolVersion")
+        if isinstance(requested_version, str) and requested_version.strip():
+            candidates.append(requested_version.strip())
+
+        requested_versions = params.get("protocolVersions")
+        if isinstance(requested_versions, list):
+            candidates.extend(
+                version.strip()
+                for version in requested_versions
+                if isinstance(version, str) and version.strip()
+            )
+        return candidates
+
+    def _negotiate_protocol_version(self, candidates: List[str]) -> str:
+        for candidate in candidates:
+            if candidate in self._SUPPORTED_PROTOCOL_VERSIONS:
+                return candidate
+
+        if candidates:
+            logger.warning("Unsupported protocol requested: %s", candidates)
+            raise MCPError(
+                code=-32602,
+                message="Unsupported protocol version",
+                data={"supportedVersions": sorted(self._SUPPORTED_PROTOCOL_VERSIONS)},
+            )
+
+        return self._DEFAULT_PROTOCOL_VERSION
+
+    def _initialize_response(self, negotiated_version: str) -> Dict[str, Any]:
+        return {
             "protocolVersion": negotiated_version,
             "serverInfo": {
                 "name": "full-auto-ci",
@@ -209,13 +236,6 @@ class MCPServer:
                 "queueTestRun, and getLatestResults methods."
             ),
         }
-        logger.info(
-            "Completed initialize handshake (client=%s %s, protocol=%s)",
-            client_info.get("name"),
-            client_info.get("version"),
-            response["protocolVersion"],
-        )
-        return response
 
     async def _handle_list_repositories(
         self, _params: Dict[str, Any]
@@ -249,27 +269,56 @@ class MCPServer:
     ) -> Dict[str, Any]:
         """Fetch recent test runs for a repository."""
 
-        repo_id = params.get("repositoryId")
-        commit_hash = params.get("commit")
-        limit = params.get("limit", 5)
-        if not isinstance(repo_id, int):
-            raise MCPError(code=-32602, message="repositoryId must be an integer")
-        if not isinstance(limit, int) or limit <= 0:
-            raise MCPError(code=-32602, message="limit must be a positive integer")
-        if commit_hash is not None:
-            if not isinstance(commit_hash, str) or not commit_hash.strip():
-                raise MCPError(
-                    code=-32602,
-                    message="commit must be a non-empty string when provided",
-                )
-            commit_hash = commit_hash.strip()
+        repo_id, commit_hash, limit, result_limit = self._latest_results_params(params)
 
         test_runs = self.service.get_test_results(
             repo_id,
             limit=limit,
             commit_hash=commit_hash,
         )
+
+        self._limit_test_run_results(test_runs, result_limit)
         return {"testRuns": test_runs}
+
+    def _latest_results_params(
+        self, params: Dict[str, Any]
+    ) -> tuple[int, Optional[str], int, int]:
+        repo_id = params.get("repositoryId")
+        commit_hash = params.get("commit")
+        limit = params.get("limit", 1)
+        result_limit = params.get("maxResults", 1)
+
+        if not isinstance(repo_id, int):
+            raise MCPError(code=-32602, message="repositoryId must be an integer")
+        if not isinstance(limit, int) or limit <= 0:
+            raise MCPError(code=-32602, message="limit must be a positive integer")
+        if not isinstance(result_limit, int) or result_limit <= 0:
+            raise MCPError(code=-32602, message="maxResults must be a positive integer")
+
+        normalized_commit: Optional[str] = None
+        if commit_hash is not None:
+            if not isinstance(commit_hash, str) or not commit_hash.strip():
+                raise MCPError(
+                    code=-32602,
+                    message="commit must be a non-empty string when provided",
+                )
+            normalized_commit = commit_hash.strip()
+
+        return repo_id, normalized_commit, limit, result_limit
+
+    def _limit_test_run_results(
+        self, test_runs: List[Dict[str, Any]], limit: int
+    ) -> None:
+        for run in test_runs:
+            results = run.get("results")
+            if not isinstance(results, list) or not results:
+                continue
+            ordered = sorted(results, key=self._result_sort_key)
+            run["results"] = ordered[:limit]
+
+    def _result_sort_key(self, item: Any) -> tuple[int, int]:
+        tool = item.get("tool") if isinstance(item, dict) else None
+        return (self._status_priority(item), self._tool_weight(tool))
 
     async def _handle_add_repository(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Register a new repository with the CI service."""
@@ -317,25 +366,74 @@ class MCPServer:
     async def _handle_run_tests(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run tests synchronously for a given repository and commit."""
 
+        repo_id, commit_hash, max_results = self._run_tests_params(params)
+        result = self.service.run_tests(repo_id, commit_hash)
+        status = result.get("status")
+        if status != "success":
+            raise MCPError(code=-32004, message="Test run failed", data=result)
+
+        trimmed = dict(result)
+        trimmed["tools"] = self._trim_tools(trimmed.get("tools"), max_results)
+        return {"status": status, "results": trimmed}
+
+    def _run_tests_params(self, params: Dict[str, Any]) -> tuple[int, str, int]:
         repo_id = params.get("repositoryId")
         commit_hash = params.get("commit")
+        max_results = params.get("maxResults", 1)
+
         if not isinstance(repo_id, int) or repo_id <= 0:
             raise MCPError(
                 code=-32602, message="repositoryId must be a positive integer"
             )
         if not isinstance(commit_hash, str) or not commit_hash.strip():
             raise MCPError(code=-32602, message="commit must be a non-empty string")
+        if not isinstance(max_results, int) or max_results <= 0:
+            raise MCPError(code=-32602, message="maxResults must be a positive integer")
 
-        result = self.service.run_tests(repo_id, commit_hash.strip())
-        status = result.get("status")
-        if status != "success":
-            raise MCPError(
-                code=-32004,
-                message="Test run failed",
-                data=result,
-            )
+        return repo_id, commit_hash.strip(), max_results
 
-        return {"status": status, "results": result}
+    def _trim_tools(self, tools: Any, max_results: int) -> Any:
+        if not isinstance(tools, dict) or not tools:
+            return tools
+
+        ordered_tools = sorted(
+            tools.items(),
+            key=lambda pair: (
+                self._status_priority(pair[1] if isinstance(pair[1], dict) else {}),
+                self._tool_weight(pair[0]),
+            ),
+        )
+        return {name: payload for name, payload in ordered_tools[:max_results]}
+
+    @staticmethod
+    def _status_priority(result: Any) -> int:
+        """Assign a priority rank to a result status (lower is higher priority)."""
+
+        if not isinstance(result, dict):
+            return 100
+
+        status = str(result.get("status", "")).strip().lower()
+        if status in {"error", "failed", "failure"}:
+            return 0
+        if status in {"warning", "warn"}:
+            return 10
+        if status in {"success", "passed", "ok"}:
+            return 50
+        if status in {"running", "queued", "pending"}:
+            return 60
+        return 90
+
+    @staticmethod
+    def _tool_weight(tool_name: Any) -> int:
+        """Prefer smaller/high-signal tools when truncating results."""
+
+        name = str(tool_name or "").strip().lower()
+        weights = {
+            "pylint": 0,
+            "coverage": 1,
+            "lizard": 2,
+        }
+        return weights.get(name, 5)
 
     async def _handle_logging_set_level(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Adjust the effective log level for the MCP server."""
@@ -376,7 +474,49 @@ class MCPServer:
     async def _handle_tools_list(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         """Return the catalog of available MCP tools."""
 
-        return {"tools": []}
+        return {"tools": self._tool_definitions()}
+
+    async def _handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Invoke a named tool and return MCP tool-call content."""
+
+        name = params.get("name")
+        arguments = params.get("arguments")
+
+        if not isinstance(name, str) or not name.strip():
+            raise MCPError(code=-32602, message="name must be a non-empty string")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise MCPError(code=-32602, message="arguments must be an object")
+
+        tool_name = name.strip()
+        handler = self._tool_handlers().get(tool_name)
+        if handler is None:
+            raise MCPError(code=-32602, message=f"Unknown tool: {tool_name}")
+
+        try:
+            result = await handler(arguments)
+        except MCPError as exc:
+            if -32100 < exc.code <= -32000:
+                return {
+                    "isError": True,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps({"error": exc.to_dict()}, indent=2),
+                        }
+                    ],
+                }
+            raise
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(result, indent=2, sort_keys=True),
+                }
+            ]
+        }
 
     async def _handle_prompts_list(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         """Return the catalog of available prompts."""
@@ -410,26 +550,39 @@ class MCPServer:
 
         if not self.auth_token:
             return
+
         logger.debug("Authentication required for method %s", method)
-        provided = params.get("token")
-        if provided is None and method == "initialize":
-            client_caps = params.get("capabilities")
-            if isinstance(client_caps, dict):
-                experimental_caps = client_caps.get("experimental")
-                if isinstance(experimental_caps, dict):
-                    token_container = experimental_caps.get("fullAutoCI")
-                    if isinstance(token_container, dict):
-                        provided = token_container.get("token") or token_container.get(
-                            "authToken"
-                        )
-                        if provided is not None:
-                            logger.debug("Token received via experimental capabilities")
-        elif provided is not None:
-            logger.debug("Token received directly in params")
+        provided = self._extract_token(method, params)
         if provided != self.auth_token:
             logger.warning("MCP authentication failed for method %s", method)
             raise MCPError(code=-32604, message="Unauthorized")
         logger.debug("Authentication succeeded for method %s", method)
+
+    def _extract_token(self, method: str, params: Dict[str, Any]) -> Any:
+        provided = params.get("token")
+        if provided is not None:
+            logger.debug("Token received directly in params")
+            return provided
+
+        if method != "initialize":
+            return None
+
+        token = self._extract_token_from_capabilities(params.get("capabilities"))
+        if token is not None:
+            logger.debug("Token received via experimental capabilities")
+        return token
+
+    @staticmethod
+    def _extract_token_from_capabilities(capabilities: Any) -> Any:
+        if not isinstance(capabilities, dict):
+            return None
+        experimental_caps = capabilities.get("experimental")
+        if not isinstance(experimental_caps, dict):
+            return None
+        token_container = experimental_caps.get("fullAutoCI")
+        if not isinstance(token_container, dict):
+            return None
+        return token_container.get("token") or token_container.get("authToken")
 
     async def serve_tcp(
         self,
@@ -518,42 +671,67 @@ class MCPServer:
         reader: asyncio.StreamReader,
     ) -> tuple[Optional[str], str]:
         """Read a JSON message supporting newline and content-length framing."""
+        first_line = await MCPServer._read_first_content_line(reader)
+        if first_line is None:
+            return None, "newline"
 
+        if first_line.lower().startswith(b"content-length:"):
+            payload = await MCPServer._read_content_length_body(reader, first_line)
+            if payload is None:
+                return None, "content-length"
+            return payload, "content-length"
+
+        payload = await MCPServer._read_newline_body(reader, first_line)
+        return payload, "newline"
+
+    @staticmethod
+    async def _read_first_content_line(
+        reader: asyncio.StreamReader,
+    ) -> Optional[bytes]:
         while True:
             line = await reader.readline()
             if not line:
-                return None, "newline"
+                return None
             if line in {b"\r\n", b"\n", b""}:
                 continue
-            break
+            return line
 
-        if line.lower().startswith(b"content-length:"):
-            try:
-                length = int(line.split(b":", 1)[1].strip())
-            except ValueError as exc:  # pragma: no cover - malformed client
-                raise MCPError(
-                    code=-32600,
-                    message="Invalid Content-Length header",
-                    data={"detail": line.decode("utf-8", errors="replace")},
-                ) from exc
+    @staticmethod
+    async def _read_content_length_body(
+        reader: asyncio.StreamReader,
+        header_line: bytes,
+    ) -> Optional[str]:
+        try:
+            length = int(header_line.split(b":", 1)[1].strip())
+        except ValueError as exc:  # pragma: no cover - malformed client
+            raise MCPError(
+                code=-32600,
+                message="Invalid Content-Length header",
+                data={"detail": header_line.decode("utf-8", errors="replace")},
+            ) from exc
 
-            while True:
-                separator = await reader.readline()
-                if not separator:
-                    return None, "content-length"
-                if separator in {b"\r\n", b"\n", b""}:
-                    break
+        while True:
+            separator = await reader.readline()
+            if not separator:
+                return None
+            if separator in {b"\r\n", b"\n", b""}:
+                break
 
-            body = await reader.readexactly(length)
-            return body.decode("utf-8"), "content-length"
+        body = await reader.readexactly(length)
+        return body.decode("utf-8")
 
-        buffer = line
+    @staticmethod
+    async def _read_newline_body(
+        reader: asyncio.StreamReader,
+        first_line: bytes,
+    ) -> str:
+        buffer = first_line
         while not buffer.rstrip().endswith(b"}"):
             more = await reader.readline()
             if not more:
                 break
             buffer += more
-        return buffer.decode("utf-8").strip(), "newline"
+        return buffer.decode("utf-8").strip()
 
     @staticmethod
     def _encode_message(message: Dict[str, Any], framing: str) -> bytes:
@@ -617,7 +795,7 @@ class MCPServer:
             },
             "tools": {
                 "list": True,
-                "call": False,
+                "call": True,
             },
             "logging": {
                 "subscribe": False,
@@ -629,6 +807,110 @@ class MCPServer:
                 }
             },
         }
+
+    def _tool_handlers(
+        self,
+    ) -> Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]:
+        """Return tool-name to handler mapping using bound methods."""
+
+        return {
+            "listRepositories": self._handle_list_repositories,
+            "addRepository": self._handle_add_repository,
+            "removeRepository": self._handle_remove_repository,
+            "queueTestRun": self._handle_queue_test_run,
+            "getLatestResults": self._handle_get_latest_results,
+            "runTests": self._handle_run_tests,
+            "shutdown": self._handle_shutdown,
+        }
+
+    @staticmethod
+    def _tool_definitions() -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": "listRepositories",
+                "description": "List repositories tracked by Full Auto CI.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "addRepository",
+                "description": "Register a repository for CI monitoring.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "url": {"type": "string"},
+                        "branch": {"type": "string", "default": "main"},
+                    },
+                    "required": ["name", "url"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "removeRepository",
+                "description": "Remove a repository from CI monitoring.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"repositoryId": {"type": "integer"}},
+                    "required": ["repositoryId"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "queueTestRun",
+                "description": "Queue a CI run for a repository/commit pair.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repositoryId": {"type": "integer"},
+                        "commit": {"type": "string"},
+                    },
+                    "required": ["repositoryId", "commit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "getLatestResults",
+                "description": "Fetch recent CI runs (default limit=1, maxResults=1).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repositoryId": {"type": "integer"},
+                        "commit": {"type": "string"},
+                        "limit": {"type": "integer", "default": 1},
+                        "maxResults": {"type": "integer", "default": 1},
+                    },
+                    "required": ["repositoryId"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "runTests",
+                "description": "Run the CI toolchain synchronously for a commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repositoryId": {"type": "integer"},
+                        "commit": {"type": "string"},
+                        "maxResults": {"type": "integer", "default": 1},
+                    },
+                    "required": ["repositoryId", "commit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "shutdown",
+                "description": "Request the MCP server to terminate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+        ]
 
     async def _serve_connection(
         self,
