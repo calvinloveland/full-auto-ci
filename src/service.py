@@ -985,17 +985,11 @@ class CIService:
             logger.error("Repository %s not found", repo_id)
             return {"status": "error", "error": f"Repository {repo_id} not found"}
 
-        repo_url = getattr(repo, "url", "")
-        if not isinstance(repo_url, str):
-            repo_url = ""
-        local_repo_path = self._resolve_local_repo_path(repo_url)
-        if (
-            not include_working_tree
-            and local_repo_path
-            and os.path.isdir(local_repo_path)
-            and self._has_local_changes(local_repo_path)
-        ):
-            include_working_tree = True
+        repo_url = self._coerce_repo_url(repo)
+        include_working_tree, local_repo_path = self._resolve_working_tree_inclusion(
+            repo_url,
+            include_working_tree=include_working_tree,
+        )
 
         warnings = self._collect_local_change_warnings(
             repo,
@@ -1003,48 +997,30 @@ class CIService:
             include_working_tree=include_working_tree,
         )
 
-        resolved_commit_hash = commit_hash
-        working_snapshot: str | None = None
-        run_root: str | None = None
-        if include_working_tree:
-            if not local_repo_path:
-                error_msg = (
-                    "includeWorkingTree is only supported for local repository URLs"
-                )
-                logger.error("%s (repo %s: %s)", error_msg, repo_id, repo_url)
-                return {"status": "error", "error": error_msg}
-
-            if not os.path.isdir(local_repo_path):
-                error_msg = "Local repository path not found"
-                logger.error(
-                    "%s (repo %s: %s -> %s)",
-                    error_msg,
-                    repo_id,
-                    repo_url,
-                    local_repo_path,
-                )
-                return {"status": "error", "error": error_msg}
-
-            head = self._resolve_head_commit(local_repo_path)
-            suffix = f"working-tree-{int(time.time())}"
-            if head:
-                resolved_commit_hash = f"{head}+{suffix}"
-            else:
-                resolved_commit_hash = f"{commit_hash}+{suffix}"
-
-            working_snapshot = self._snapshot_working_tree(local_repo_path, repo_id)
-            run_root = working_snapshot
+        working_tree_setup = self._prepare_working_tree_run(
+            repo_id,
+            commit_hash,
+            repo_url,
+            local_repo_path,
+            include_working_tree=include_working_tree,
+        )
+        if isinstance(working_tree_setup, dict):
+            return working_tree_setup
+        resolved_commit_hash, working_snapshot, run_root = working_tree_setup
 
         test_run_id = self._create_test_run(repo_id, resolved_commit_hash)
         self._update_test_run(test_run_id, "running")
 
         try:
-            if not include_working_tree:
-                early_error = self._prepare_repo_for_run(
-                    repo, repo_id, commit_hash, test_run_id
-                )
-                if early_error is not None:
-                    return early_error
+            early_error = self._maybe_prepare_repo_for_run(
+                repo,
+                repo_id,
+                commit_hash,
+                test_run_id,
+                include_working_tree=include_working_tree,
+            )
+            if early_error is not None:
+                return early_error
 
             return self._execute_tool_run(
                 repo_id,
@@ -1055,8 +1031,84 @@ class CIService:
                 run_root=run_root,
             )
         finally:
-            if working_snapshot and os.path.isdir(working_snapshot):
-                shutil.rmtree(working_snapshot, ignore_errors=True)
+            self._cleanup_working_snapshot(working_snapshot)
+
+    @staticmethod
+    def _coerce_repo_url(repo: Any) -> str:
+        repo_url = getattr(repo, "url", "")
+        return repo_url if isinstance(repo_url, str) else ""
+
+    def _resolve_working_tree_inclusion(
+        self,
+        repo_url: str,
+        *,
+        include_working_tree: bool,
+    ) -> tuple[bool, str | None]:
+        local_repo_path = self._resolve_local_repo_path(repo_url)
+        if include_working_tree:
+            return True, local_repo_path
+        if not local_repo_path:
+            return False, None
+        if not os.path.isdir(local_repo_path):
+            return False, local_repo_path
+        if self._has_local_changes(local_repo_path):
+            return True, local_repo_path
+        return False, local_repo_path
+
+    def _maybe_prepare_repo_for_run(
+        self,
+        repo: Any,
+        repo_id: int,
+        commit_hash: str,
+        test_run_id: int,
+        *,
+        include_working_tree: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if include_working_tree:
+            return None
+        return self._prepare_repo_for_run(repo, repo_id, commit_hash, test_run_id)
+
+    @staticmethod
+    def _cleanup_working_snapshot(working_snapshot: str | None) -> None:
+        if not working_snapshot:
+            return
+        if os.path.isdir(working_snapshot):
+            shutil.rmtree(working_snapshot, ignore_errors=True)
+
+    def _prepare_working_tree_run(
+        self,
+        repo_id: int,
+        commit_hash: str,
+        repo_url: str,
+        local_repo_path: str | None,
+        *,
+        include_working_tree: bool,
+    ) -> tuple[str, str | None, str | None] | Dict[str, Any]:
+        if not include_working_tree:
+            return commit_hash, None, None
+
+        if not local_repo_path:
+            error_msg = "includeWorkingTree is only supported for local repository URLs"
+            logger.error("%s (repo %s: %s)", error_msg, repo_id, repo_url)
+            return {"status": "error", "error": error_msg}
+
+        if not os.path.isdir(local_repo_path):
+            error_msg = "Local repository path not found"
+            logger.error(
+                "%s (repo %s: %s -> %s)",
+                error_msg,
+                repo_id,
+                repo_url,
+                local_repo_path,
+            )
+            return {"status": "error", "error": error_msg}
+
+        head = self._resolve_head_commit(local_repo_path)
+        suffix = f"working-tree-{int(time.time())}"
+        resolved_commit_hash = f"{head}+{suffix}" if head else f"{commit_hash}+{suffix}"
+
+        working_snapshot = self._snapshot_working_tree(local_repo_path, repo_id)
+        return resolved_commit_hash, working_snapshot, working_snapshot
 
     def _collect_local_change_warnings(
         self,
