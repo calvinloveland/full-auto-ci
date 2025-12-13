@@ -279,12 +279,35 @@ class GitRepo:
                 )
                 return False
 
+            # Ensure the commit object exists locally (older clones may be missing it)
+            commit_ref = f"{commit_hash}^{{commit}}"
+            exists_result = subprocess.run(
+                ["git", "cat-file", "-e", commit_ref],
+                cwd=self.repo_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if exists_result.returncode != 0:
+                logger.info(
+                    "Commit %s missing locally for %s; fetching updates",
+                    commit_hash,
+                    self.name,
+                )
+                subprocess.run(
+                    ["git", "fetch", "origin", "--tags", "--prune"],
+                    cwd=self.repo_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
             # Checkout the commit
             logger.info(
                 "Checking out commit %s for repository %s", commit_hash, self.name
             )
             subprocess.run(
-                ["git", "checkout", commit_hash],
+                ["git", "checkout", "--force", commit_hash],
                 cwd=self.repo_path,
                 check=True,
                 capture_output=True,

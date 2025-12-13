@@ -366,8 +366,14 @@ class MCPServer:
     async def _handle_run_tests(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run tests synchronously for a given repository and commit."""
 
-        repo_id, commit_hash, max_results = self._run_tests_params(params)
-        result = self.service.run_tests(repo_id, commit_hash)
+        repo_id, commit_hash, max_results, include_working_tree = (
+            self._run_tests_params(params)
+        )
+        result = self.service.run_tests(
+            repo_id,
+            commit_hash,
+            include_working_tree=include_working_tree,
+        )
         status = result.get("status")
         if status != "success":
             raise MCPError(code=-32004, message="Test run failed", data=result)
@@ -376,10 +382,11 @@ class MCPServer:
         trimmed["tools"] = self._trim_tools(trimmed.get("tools"), max_results)
         return {"status": status, "results": trimmed}
 
-    def _run_tests_params(self, params: Dict[str, Any]) -> tuple[int, str, int]:
+    def _run_tests_params(self, params: Dict[str, Any]) -> tuple[int, str, int, bool]:
         repo_id = params.get("repositoryId")
         commit_hash = params.get("commit")
         max_results = params.get("maxResults", 1)
+        include_working_tree = params.get("includeWorkingTree", False)
 
         if not isinstance(repo_id, int) or repo_id <= 0:
             raise MCPError(
@@ -390,7 +397,13 @@ class MCPServer:
         if not isinstance(max_results, int) or max_results <= 0:
             raise MCPError(code=-32602, message="maxResults must be a positive integer")
 
-        return repo_id, commit_hash.strip(), max_results
+        if not isinstance(include_working_tree, bool):
+            raise MCPError(
+                code=-32602,
+                message="includeWorkingTree must be a boolean",
+            )
+
+        return repo_id, commit_hash.strip(), max_results, include_working_tree
 
     def _trim_tools(self, tools: Any, max_results: int) -> Any:
         if not isinstance(tools, dict) or not tools:
@@ -403,7 +416,7 @@ class MCPServer:
                 self._tool_weight(pair[0]),
             ),
         )
-        return {name: payload for name, payload in ordered_tools[:max_results]}
+        return dict(ordered_tools[:max_results])
 
     @staticmethod
     def _status_priority(result: Any) -> int:
@@ -896,6 +909,7 @@ class MCPServer:
                         "repositoryId": {"type": "integer"},
                         "commit": {"type": "string"},
                         "maxResults": {"type": "integer", "default": 1},
+                        "includeWorkingTree": {"type": "boolean", "default": False},
                     },
                     "required": ["repositoryId", "commit"],
                     "additionalProperties": False,

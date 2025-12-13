@@ -85,7 +85,7 @@ class DummyService:
         self.add_test_task_should_succeed = True
         self.add_repository_should_fail = False
         self._next_repo_id = 2
-        self.run_tests_calls: List[Tuple[int, str]] = []
+        self.run_tests_calls: List[Tuple[int, str, bool]] = []
         self.run_tests_result: Dict[str, Any] = {
             "status": "success",
             "tools": {
@@ -137,8 +137,14 @@ class DummyService:
         self.repositories.pop(index)
         return True
 
-    def run_tests(self, repo_id: int, commit_hash: str) -> Dict[str, Any]:
-        self.run_tests_calls.append((repo_id, commit_hash))
+    def run_tests(
+        self,
+        repo_id: int,
+        commit_hash: str,
+        *,
+        include_working_tree: bool = False,
+    ) -> Dict[str, Any]:
+        self.run_tests_calls.append((repo_id, commit_hash, include_working_tree))
         return self.run_tests_result
 
 
@@ -705,7 +711,7 @@ def test_run_tests_returns_results(dummy_service):
 
     assert response["result"]["status"] == "success"
     assert len(response["result"]["results"]["tools"]) == 1
-    assert dummy_service.run_tests_calls[-1] == (1, "abcdef1")
+    assert dummy_service.run_tests_calls[-1] == (1, "abcdef1", False)
 
 
 def test_run_tests_allows_multiple_results(dummy_service):
@@ -723,6 +729,47 @@ def test_run_tests_allows_multiple_results(dummy_service):
 
     assert response["result"]["status"] == "success"
     assert len(response["result"]["results"]["tools"]) == 2
+
+
+def test_run_tests_allows_working_tree_flag(dummy_service):
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 161,
+                "method": "runTests",
+                "params": {
+                    "repositoryId": 1,
+                    "commit": "abcdef1",
+                    "includeWorkingTree": True,
+                },
+            }
+        )
+    )
+
+    assert response["result"]["status"] == "success"
+    assert dummy_service.run_tests_calls[-1] == (1, "abcdef1", True)
+
+
+def test_run_tests_rejects_non_boolean_working_tree_flag(dummy_service):
+    server = MCPServer(dummy_service)
+    with pytest.raises(MCPError) as excinfo:
+        _run(
+            server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 162,
+                    "method": "runTests",
+                    "params": {
+                        "repositoryId": 1,
+                        "commit": "abcdef1",
+                        "includeWorkingTree": "yes",
+                    },
+                }
+            )
+        )
+    assert excinfo.value.code == -32602
 
 
 def test_run_tests_failure_raises(dummy_service):

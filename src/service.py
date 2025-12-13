@@ -5,12 +5,15 @@ import json
 import logging
 import os
 import queue
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from .config import Config
 from .db import DataAccess
@@ -959,7 +962,13 @@ class CIService:
                 logger.error("Error monitoring repositories: %s", exc)
                 time.sleep(60)  # Retry after a minute
 
-    def run_tests(self, repo_id: int, commit_hash: str) -> Dict[str, Any]:
+    def run_tests(
+        self,
+        repo_id: int,
+        commit_hash: str,
+        *,
+        include_working_tree: bool = False,
+    ) -> Dict[str, Any]:
         """Run tests for a specific commit.
 
         Args:
@@ -976,30 +985,180 @@ class CIService:
             logger.error("Repository %s not found", repo_id)
             return {"status": "error", "error": f"Repository {repo_id} not found"}
 
-        warnings = self._collect_local_change_warnings(repo, repo_id)
-        test_run_id = self._create_test_run(repo_id, commit_hash)
+        repo_url = getattr(repo, "url", "")
+        if not isinstance(repo_url, str):
+            repo_url = ""
+        local_repo_path = self._resolve_local_repo_path(repo_url)
+        if (
+            not include_working_tree
+            and local_repo_path
+            and os.path.isdir(local_repo_path)
+            and self._has_local_changes(local_repo_path)
+        ):
+            include_working_tree = True
+
+        warnings = self._collect_local_change_warnings(
+            repo,
+            repo_id,
+            include_working_tree=include_working_tree,
+        )
+
+        resolved_commit_hash = commit_hash
+        working_snapshot: str | None = None
+        run_root: str | None = None
+        if include_working_tree:
+            if not local_repo_path:
+                error_msg = (
+                    "includeWorkingTree is only supported for local repository URLs"
+                )
+                logger.error("%s (repo %s: %s)", error_msg, repo_id, repo_url)
+                return {"status": "error", "error": error_msg}
+
+            if not os.path.isdir(local_repo_path):
+                error_msg = "Local repository path not found"
+                logger.error(
+                    "%s (repo %s: %s -> %s)",
+                    error_msg,
+                    repo_id,
+                    repo_url,
+                    local_repo_path,
+                )
+                return {"status": "error", "error": error_msg}
+
+            head = self._resolve_head_commit(local_repo_path)
+            suffix = f"working-tree-{int(time.time())}"
+            if head:
+                resolved_commit_hash = f"{head}+{suffix}"
+            else:
+                resolved_commit_hash = f"{commit_hash}+{suffix}"
+
+            working_snapshot = self._snapshot_working_tree(local_repo_path, repo_id)
+            run_root = working_snapshot
+
+        test_run_id = self._create_test_run(repo_id, resolved_commit_hash)
         self._update_test_run(test_run_id, "running")
 
-        early_error = self._prepare_repo_for_run(
-            repo, repo_id, commit_hash, test_run_id
-        )
-        if early_error is not None:
-            return early_error
+        try:
+            if not include_working_tree:
+                early_error = self._prepare_repo_for_run(
+                    repo, repo_id, commit_hash, test_run_id
+                )
+                if early_error is not None:
+                    return early_error
 
-        return self._execute_tool_run(repo_id, commit_hash, repo, test_run_id, warnings)
+            return self._execute_tool_run(
+                repo_id,
+                resolved_commit_hash,
+                repo,
+                test_run_id,
+                warnings,
+                run_root=run_root,
+            )
+        finally:
+            if working_snapshot and os.path.isdir(working_snapshot):
+                shutil.rmtree(working_snapshot, ignore_errors=True)
 
-    def _collect_local_change_warnings(self, repo: Any, repo_id: int) -> List[str]:
+    def _collect_local_change_warnings(
+        self,
+        repo: Any,
+        repo_id: int,
+        *,
+        include_working_tree: bool = False,
+    ) -> List[str]:
         warnings: List[str] = []
-        if not self._has_local_changes(getattr(repo, "url", "")):
+
+        repo_url = getattr(repo, "url", "")
+        if not isinstance(repo_url, str):
+            repo_url = ""
+        local_path = self._resolve_local_repo_path(repo_url)
+        if not local_path:
             return warnings
 
-        warning = (
-            "Uncommitted changes detected in the source repository; "
-            "only committed files are included in this run."
-        )
-        logger.warning("%s (repo %s: %s)", warning, repo_id, getattr(repo, "url", ""))
-        warnings.append(warning)
+        if not self._has_local_changes(local_path):
+            return warnings
+
+        if include_working_tree:
+            warning = (
+                "Uncommitted changes detected in the source repository; "
+                "working tree files are included in this run."
+            )
+            logger.info(
+                "%s (repo %s: %s)",
+                warning,
+                repo_id,
+                repo_url,
+            )
+            warnings.append(warning)
+        else:
+            warning = (
+                "Uncommitted changes detected in the source repository; "
+                "only committed files are included in this run."
+            )
+            logger.warning("%s (repo %s: %s)", warning, repo_id, repo_url)
+            warnings.append(warning)
         return warnings
+
+    @staticmethod
+    def _resolve_local_repo_path(repo_url: str) -> Optional[str]:
+        if not isinstance(repo_url, str) or not repo_url.strip():
+            return None
+
+        parsed = urlparse(repo_url)
+        if parsed.scheme and parsed.scheme != "file":
+            return None
+        if parsed.scheme == "file":
+            path = unquote(parsed.path or "")
+            return path or None
+        return repo_url
+
+    @staticmethod
+    def _resolve_head_commit(repo_path: str) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, ValueError):
+            return None
+        value = (result.stdout or "").strip()
+        return value if result.returncode == 0 and value else None
+
+    def _snapshot_working_tree(self, repo_path: str, repo_id: int) -> str:
+        base_dir = os.path.expanduser("~/.fullautoci/working_tree_snapshots")
+        os.makedirs(base_dir, exist_ok=True)
+
+        snapshot_dir = tempfile.mkdtemp(prefix=f"repo_{repo_id}_", dir=base_dir)
+
+        ignore = shutil.ignore_patterns(
+            ".git",
+            ".hg",
+            ".svn",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".tox",
+            ".venv",
+            "venv",
+            "dist",
+            "build",
+            "*.egg-info",
+            ".coverage",
+            "coverage.xml",
+        )
+
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        shutil.copytree(
+            repo_path,
+            snapshot_dir,
+            symlinks=True,
+            ignore=ignore,
+            dirs_exist_ok=False,
+        )
+        return snapshot_dir
 
     def _prepare_repo_for_run(
         self,
@@ -1029,12 +1188,15 @@ class CIService:
         repo: Any,
         test_run_id: int,
         warnings: List[str],
+        *,
+        run_root: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
             logger.info(
                 "Running tools for repository %s, commit %s", repo_id, commit_hash
             )
-            results = self.tool_runner.run_all(repo.repo_path)
+            root = run_root or repo.repo_path
+            results = self.tool_runner.run_all(root)
             self._store_results(repo_id, commit_hash, results)
 
             overall_status, message = self._summarize_tool_results(results)
