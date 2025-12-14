@@ -45,9 +45,25 @@ class Tool:  # pylint: disable=too-few-public-methods
 class Pylint(Tool):  # pylint: disable=too-few-public-methods
     """Pylint code analysis tool."""
 
-    def __init__(self):
+    def __init__(self, config_file: Optional[str] = None):
         """Initialize Pylint."""
         super().__init__("pylint")
+        self.config_file = config_file
+
+    def _resolve_config_file(self, repo_path: str) -> Optional[str]:
+        config_file = self.config_file
+        if not config_file or not isinstance(config_file, str):
+            return None
+
+        candidate = os.path.expanduser(config_file.strip())
+        if not candidate:
+            return None
+
+        if os.path.isabs(candidate):
+            return candidate if os.path.isfile(candidate) else None
+
+        repo_candidate = os.path.join(repo_path, candidate)
+        return repo_candidate if os.path.isfile(repo_candidate) else None
 
     def run(self, repo_path: str) -> Dict[str, Any]:
         """Run Pylint.
@@ -64,7 +80,11 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                 "Running Pylint on %s (targets: %s)", repo_path, ", ".join(targets)
             )
 
-            cmd = ["pylint", "--output-format=json", *targets]
+            cmd = ["pylint", "--output-format=json"]
+            rcfile = self._resolve_config_file(repo_path)
+            if rcfile:
+                cmd.extend(["--rcfile", rcfile])
+            cmd.extend(targets)
             process = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -131,11 +151,29 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
 
         src_dir = os.path.join(repo_path, "src")
         if os.path.isdir(src_dir):
-            packages = self._package_directories(src_dir)
-            if packages:
-                targets.extend([os.path.join("src", pkg) for pkg in packages])
-            else:
-                targets.append("src")
+            targets.append("src")
+
+        tests_dir = os.path.join(repo_path, "tests")
+        if os.path.isdir(tests_dir):
+            targets.append("tests")
+
+        ui_tests_dir = os.path.join(repo_path, "ui_tests")
+        if os.path.isdir(ui_tests_dir):
+            targets.append("ui_tests")
+
+        # Include top-level Python modules (e.g. main.py) when present.
+        try:
+            entries = sorted(os.listdir(repo_path))
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.endswith(".py"):
+                continue
+            if entry.startswith("."):
+                continue
+            full_path = os.path.join(repo_path, entry)
+            if os.path.isfile(full_path):
+                targets.append(entry)
 
         if not targets:
             root_packages = self._package_directories(repo_path)

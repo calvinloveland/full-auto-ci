@@ -105,17 +105,47 @@ class TestPylint(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("error", result)
 
-    def test_discover_targets_prefers_src_packages(self):
-        """Pylint should target packages inside the src directory when present."""
+    def test_discover_targets_prefers_src_root(self):
+        """If a src directory exists, lint the src root (packages + modules)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             package = Path(tmpdir) / "src" / "full_auto_ci"
             package.mkdir(parents=True)
             (package / "__init__.py").write_text("", encoding="utf-8")
 
+            (Path(tmpdir) / "src" / "service.py").write_text(
+                "print('hello')\n", encoding="utf-8"
+            )
+
             targets = self.pylint._discover_targets(
                 tmpdir
             )  # pylint: disable=protected-access
-            self.assertEqual(targets, ["src/full_auto_ci"])
+            self.assertIn("src", targets)
+
+    @patch("subprocess.run")
+    def test_run_uses_rcfile_when_configured(self, mock_run):
+        """Configured `config_file` should be forwarded to pylint as --rcfile."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rcfile = Path(tmpdir) / "pylintrc"
+            rcfile.write_text("[MASTER]\n", encoding="utf-8")
+
+            tool = Pylint(config_file=str(rcfile))
+
+            mock_process = MagicMock()
+            mock_process.returncode = 0
+            mock_process.stdout = "[]"
+            mock_run.return_value = mock_process
+
+            with patch.object(tool, "_discover_targets", return_value=["src"]):
+                result = tool.run(tmpdir)
+
+            self.assertEqual(result["status"], "success")
+            mock_run.assert_called_with(
+                ["pylint", "--output-format=json", "--rcfile", str(rcfile), "src"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=tmpdir,
+            )
 
     def test_discover_targets_respects_config(self):
         """When explicit config exists, run Pylint from repository root."""

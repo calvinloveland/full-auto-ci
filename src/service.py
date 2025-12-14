@@ -142,7 +142,10 @@ class CIService:
 
         pylint_config = tools_config.get("pylint", {})
         if self._tool_enabled(pylint_config):
-            tools.append(Pylint())
+            config_file = None
+            if isinstance(pylint_config, dict):
+                config_file = pylint_config.get("config_file")
+            tools.append(Pylint(config_file=config_file if isinstance(config_file, str) else None))
 
         coverage_config = tools_config.get("coverage", {})
         if self._tool_enabled(coverage_config):
