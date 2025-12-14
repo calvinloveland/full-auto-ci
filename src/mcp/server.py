@@ -459,34 +459,12 @@ class MCPServer:
         toolchain so agents can fix issues and immediately request an updated list.
         """
 
-        max_issues = params.get("maxIssues", 50)
-        repo_path = params.get("repoPath", ".")
-        tool_names = params.get("toolNames")
-
-        if not isinstance(max_issues, int) or max_issues <= 0:
-            raise MCPError(code=-32602, message="maxIssues must be a positive integer")
-        if not isinstance(repo_path, str) or not repo_path.strip():
-            raise MCPError(code=-32602, message="repoPath must be a non-empty string")
-
-        tool_filter: Optional[set[str]] = None
-        if tool_names is not None:
-            if not isinstance(tool_names, list) or not all(
-                isinstance(item, str) and item.strip() for item in tool_names
-            ):
-                raise MCPError(
-                    code=-32602,
-                    message="toolNames must be a list of non-empty strings",
-                )
-            tool_filter = {item.strip() for item in tool_names}
+        max_issues, repo_path, tool_filter = self._parse_working_tree_issue_params(
+            params
+        )
 
         root = self._resolve_repo_root(repo_path)
-
-        tool_runner = getattr(self.service, "tool_runner", None)
-        if tool_runner is None or not hasattr(tool_runner, "run_all"):
-            raise MCPError(
-                code=-32005,
-                message="Tool runner not available",
-            )
+        tool_runner = self._require_tool_runner()
 
         results = tool_runner.run_all(root)
         if not isinstance(results, dict):
@@ -506,6 +484,42 @@ class MCPServer:
             "summary": summary,
             "truncated": truncated,
         }
+
+    @staticmethod
+    def _parse_working_tree_issue_params(
+        params: Dict[str, Any],
+    ) -> tuple[int, str, Optional[set[str]]]:
+        max_issues = params.get("maxIssues", 50)
+        repo_path = params.get("repoPath", ".")
+        tool_names = params.get("toolNames")
+
+        if not isinstance(max_issues, int) or max_issues <= 0:
+            raise MCPError(code=-32602, message="maxIssues must be a positive integer")
+        if not isinstance(repo_path, str) or not repo_path.strip():
+            raise MCPError(code=-32602, message="repoPath must be a non-empty string")
+
+        tool_filter: Optional[set[str]] = None
+        if tool_names is not None:
+            tool_filter = MCPServer._parse_tool_filter(tool_names)
+
+        return max_issues, repo_path, tool_filter
+
+    @staticmethod
+    def _parse_tool_filter(tool_names: Any) -> set[str]:
+        if not isinstance(tool_names, list) or not all(
+            isinstance(item, str) and item.strip() for item in tool_names
+        ):
+            raise MCPError(
+                code=-32602,
+                message="toolNames must be a list of non-empty strings",
+            )
+        return {item.strip() for item in tool_names}
+
+    def _require_tool_runner(self) -> Any:
+        tool_runner = getattr(self.service, "tool_runner", None)
+        if tool_runner is None or not hasattr(tool_runner, "run_all"):
+            raise MCPError(code=-32005, message="Tool runner not available")
+        return tool_runner
 
     @staticmethod
     def _resolve_repo_root(repo_path: str) -> str:
@@ -540,46 +554,72 @@ class MCPServer:
         tool_filter: Optional[set[str]],
     ) -> tuple[List[Dict[str, Any]], bool]:
         issues: List[Dict[str, Any]] = []
-
         for tool_name, tool_result in results.items():
-            if tool_filter is not None and tool_name not in tool_filter:
+            if not self._include_tool(tool_name, tool_filter):
                 continue
             if not isinstance(tool_result, dict):
                 continue
 
-            status = str(tool_result.get("status", "")).strip().lower()
-            if status and status not in {"success", "passed", "ok"}:
-                issues.append(
-                    self._make_issue(
-                        tool=tool_name,
-                        severity="error",
-                        message=str(tool_result.get("error") or "Tool failed"),
-                    )
-                )
+            for issue in self._issues_for_tool(tool_name, tool_result):
+                issues.append(issue)
                 if len(issues) >= max_issues:
                     return issues[:max_issues], True
 
-            if tool_name == "pylint":
-                details = tool_result.get("details")
-                if isinstance(details, list):
-                    for item in details:
-                        if not isinstance(item, dict):
-                            continue
-                        issues.append(self._issue_from_pylint(item))
-                        if len(issues) >= max_issues:
-                            return issues[:max_issues], True
-
-            if tool_name == "lizard":
-                offenders = tool_result.get("top_offenders")
-                if isinstance(offenders, list):
-                    for offender in offenders:
-                        if not isinstance(offender, dict):
-                            continue
-                        issues.append(self._issue_from_lizard(offender))
-                        if len(issues) >= max_issues:
-                            return issues[:max_issues], True
-
         return issues, False
+
+    @staticmethod
+    def _include_tool(tool_name: Any, tool_filter: Optional[set[str]]) -> bool:
+        if tool_filter is None:
+            return True
+        return str(tool_name) in tool_filter
+
+    def _issues_for_tool(
+        self, tool_name: str, tool_result: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+
+        failure_issue = self._tool_failure_issue(tool_name, tool_result)
+        if failure_issue is not None:
+            issues.append(failure_issue)
+
+        if tool_name == "pylint":
+            issues.extend(self._issues_from_pylint_details(tool_result.get("details")))
+        elif tool_name == "lizard":
+            issues.extend(
+                self._issues_from_lizard_offenders(tool_result.get("top_offenders"))
+            )
+
+        return issues
+
+    def _tool_failure_issue(
+        self, tool_name: str, tool_result: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        status = str(tool_result.get("status", "")).strip().lower()
+        if not status or status in {"success", "passed", "ok"}:
+            return None
+        return self._make_issue(
+            tool=tool_name,
+            severity="error",
+            message=str(tool_result.get("error") or "Tool failed"),
+        )
+
+    def _issues_from_pylint_details(self, details: Any) -> List[Dict[str, Any]]:
+        if not isinstance(details, list):
+            return []
+        issues: List[Dict[str, Any]] = []
+        for item in details:
+            if isinstance(item, dict):
+                issues.append(self._issue_from_pylint(item))
+        return issues
+
+    def _issues_from_lizard_offenders(self, offenders: Any) -> List[Dict[str, Any]]:
+        if not isinstance(offenders, list):
+            return []
+        issues: List[Dict[str, Any]] = []
+        for offender in offenders:
+            if isinstance(offender, dict):
+                issues.append(self._issue_from_lizard(offender))
+        return issues
 
     def _issue_from_pylint(self, item: Dict[str, Any]) -> Dict[str, Any]:
         pylint_type = str(item.get("type") or "").strip().lower()

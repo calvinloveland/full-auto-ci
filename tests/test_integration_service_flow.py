@@ -65,6 +65,7 @@ class StubGitTracker:
     def add_repository(
         self, repo_id: int, name: str, url: str, branch: str = "main"
     ) -> bool:  # noqa: D401 - interface parity
+        _ = (name, url, branch)
         if repo_id in self.repos:
             return True
         path = (

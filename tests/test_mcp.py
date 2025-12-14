@@ -14,7 +14,11 @@ from src.mcp.server import MCPError, MCPServer
 
 
 class DummyData:
+    """In-memory DataAccess stand-in for MCP tests."""
+
     def __init__(self) -> None:
+        """Seed predictable test-run + tool result fixtures."""
+
         self._runs = [
             {
                 "id": 1,
@@ -49,6 +53,8 @@ class DummyData:
     def fetch_recent_test_runs(
         self, repo_id: int, limit: int = 20, commit_hash: str | None = None
     ):
+        """Return recent test runs for a repository."""
+
         if repo_id != 1:
             return []
         runs = self._runs
@@ -57,9 +63,13 @@ class DummyData:
         return runs[:limit]
 
     def fetch_results_for_test_run(self, test_run_id: int):
+        """Return tool results for a given test run id."""
+
         return self._results.get(test_run_id, [])
 
     def fetch_commit_for_test_run(self, test_run_id: int):
+        """Return commit metadata for a given test run id."""
+
         return {
             "id": test_run_id,
             "hash": "abcdef1",
@@ -71,29 +81,35 @@ class DummyData:
 
 
 class DummyService:
+    """Minimal CI service stand-in used by MCPServer tests."""
+
     def __init__(self) -> None:
-        self.repositories = [
-            {
-                "id": 1,
-                "name": "Repo One",
-                "url": "https://example.com/one.git",
-                "branch": "main",
-            }
-        ]
+        """Initialize predictable repository and tool runner fixtures."""
+
         self.data = DummyData()
-        self.queued = []
-        self.add_test_task_should_succeed = True
-        self.add_repository_should_fail = False
-        self._next_repo_id = 2
-        self.run_tests_calls: List[Tuple[int, str, bool]] = []
-        self.run_tests_result: Dict[str, Any] = {
-            "status": "success",
-            "tools": {
-                "pylint": {"status": "success", "score": 10},
-                "coverage": {"status": "success", "percent": 95},
+        self._state: Dict[str, Any] = {
+            "repositories": [
+                {
+                    "id": 1,
+                    "name": "Repo One",
+                    "url": "https://example.com/one.git",
+                    "branch": "main",
+                }
+            ],
+            "queued": [],
+            "add_test_task_should_succeed": True,
+            "add_repository_should_fail": False,
+            "next_repo_id": 2,
+            "run_tests_calls": [],
+            "run_tests_result": {
+                "status": "success",
+                "tools": {
+                    "pylint": {"status": "success", "score": 10},
+                    "coverage": {"status": "success", "percent": 95},
+                },
             },
+            "get_results_calls": [],
         }
-        self.get_results_calls: List[Tuple[int, Optional[str], int]] = []
         self.tool_runner = DummyToolRunner(
             {
                 "pylint": {
@@ -106,16 +122,82 @@ class DummyService:
             }
         )
 
+    @property
+    def repositories(self) -> List[Dict[str, Any]]:
+        """Repository records exposed by the service."""
+
+        return self._state["repositories"]
+
+    @property
+    def queued(self) -> List[Tuple[int, str]]:
+        """Queued test tasks (repo_id, commit_hash)."""
+
+        return self._state["queued"]
+
+    @property
+    def add_test_task_should_succeed(self) -> bool:
+        """Whether add_test_task should report success."""
+
+        return bool(self._state["add_test_task_should_succeed"])
+
+    @add_test_task_should_succeed.setter
+    def add_test_task_should_succeed(self, value: bool) -> None:
+        """Control add_test_task success behavior."""
+
+        self._state["add_test_task_should_succeed"] = bool(value)
+
+    @property
+    def add_repository_should_fail(self) -> bool:
+        """Whether add_repository should fail by returning id 0."""
+
+        return bool(self._state["add_repository_should_fail"])
+
+    @add_repository_should_fail.setter
+    def add_repository_should_fail(self, value: bool) -> None:
+        """Control add_repository failure behavior."""
+
+        self._state["add_repository_should_fail"] = bool(value)
+
+    @property
+    def run_tests_calls(self) -> List[Tuple[int, str, bool]]:
+        """Record of run_tests calls."""
+
+        return self._state["run_tests_calls"]
+
+    @property
+    def run_tests_result(self) -> Dict[str, Any]:
+        """Result payload returned by run_tests."""
+
+        return self._state["run_tests_result"]
+
+    @run_tests_result.setter
+    def run_tests_result(self, value: Dict[str, Any]) -> None:
+        """Override the run_tests return payload."""
+
+        self._state["run_tests_result"] = value
+
+    @property
+    def get_results_calls(self) -> List[Tuple[int, Optional[str], int]]:
+        """Record of get_test_results invocations."""
+
+        return self._state["get_results_calls"]
+
     def list_repositories(self):
+        """Return tracked repositories."""
+
         return self.repositories
 
     def add_test_task(self, repo_id: int, commit_hash: str) -> bool:
+        """Queue a test task for later processing."""
+
         self.queued.append((repo_id, commit_hash))
         return self.add_test_task_should_succeed
 
     def get_test_results(
         self, repo_id: int, *, commit_hash: str | None = None, limit: int = 20
     ):
+        """Return historical runs enriched with tool results."""
+
         self.get_results_calls.append((repo_id, commit_hash, limit))
         runs = self.data.fetch_recent_test_runs(
             repo_id, limit=limit, commit_hash=commit_hash
@@ -128,15 +210,19 @@ class DummyService:
         return enriched
 
     def add_repository(self, name: str, url: str, branch: str = "main") -> int:
+        """Register a repository and return its id, or 0 on failure."""
+
         if self.add_repository_should_fail:
             return 0
-        repo_id = self._next_repo_id
-        self._next_repo_id += 1
+        repo_id = int(self._state["next_repo_id"])
+        self._state["next_repo_id"] = repo_id + 1
         record = {"id": repo_id, "name": name, "url": url, "branch": branch}
         self.repositories.append(record)
         return repo_id
 
     def remove_repository(self, repo_id: int) -> bool:
+        """Remove a repository by id."""
+
         if not self.repositories:
             return False
         index = next(
@@ -155,38 +241,56 @@ class DummyService:
         *,
         include_working_tree: bool = False,
     ) -> Dict[str, Any]:
+        """Record and return the configured run_tests_result payload."""
+
         self.run_tests_calls.append((repo_id, commit_hash, include_working_tree))
         return self.run_tests_result
 
 
 class DummyToolRunner:
+    """Minimal ToolRunner stand-in returning canned results."""
+
     def __init__(self, results: Dict[str, Any]):
+        """Initialize runner with pre-computed tool results."""
+
         self._results = results
         self.calls: List[str] = []
 
     @property
     def results(self) -> Dict[str, Any]:
+        """Return the current tool results payload."""
+
         return self._results
 
     @results.setter
     def results(self, value: Dict[str, Any]) -> None:
+        """Replace the tool results payload."""
+
         self._results = value
 
     def run_all(self, repo_path: str) -> Dict[str, Any]:
+        """Pretend to run tools by returning the canned results."""
+
         self.calls.append(repo_path)
         return self._results
 
 
 @pytest.fixture()
-def dummy_service():
+def service_stub():
+    """Provide a DummyService instance for tests."""
+
     return DummyService()
 
 
 def _run(coro):
+    """Run an async coroutine synchronously for tests."""
+
     return asyncio.run(coro)
 
 
 async def _open_connection_with_retry(host: str, port: int, timeout: float = 2.0):
+    """Open a TCP connection, retrying briefly while a server starts."""
+
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     last_error: Exception | None = None
@@ -202,8 +306,10 @@ async def _open_connection_with_retry(host: str, port: int, timeout: float = 2.0
             await asyncio.sleep(0.05)
 
 
-def test_handshake_announces_capabilities(dummy_service):
-    server = MCPServer(dummy_service)
+def test_handshake_announces_capabilities(service_stub):
+    """Handshake should announce server capabilities."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "handshake"})
     )
@@ -222,8 +328,10 @@ def test_handshake_announces_capabilities(dummy_service):
     }
 
 
-def test_initialize_negotiates_protocol_and_capabilities(dummy_service):
-    server = MCPServer(dummy_service)
+def test_initialize_negotiates_protocol_and_capabilities(service_stub):
+    """Initialize should negotiate protocol version and return capabilities."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -255,8 +363,10 @@ def test_initialize_negotiates_protocol_and_capabilities(dummy_service):
     assert "instructions" in result
 
 
-def test_initialize_handles_protocol_version_list(dummy_service):
-    server = MCPServer(dummy_service)
+def test_initialize_handles_protocol_version_list(service_stub):
+    """Initialize should accept protocolVersions and choose a supported value."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -275,8 +385,10 @@ def test_initialize_handles_protocol_version_list(dummy_service):
     assert result["protocolVersion"] == "2024-12-06"
 
 
-def test_tools_list_exposes_full_auto_ci_tools(dummy_service):
-    server = MCPServer(dummy_service)
+def test_tools_list_exposes_full_auto_ci_tools(service_stub):
+    """tools/list should expose Full Auto CI tool definitions."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message({"jsonrpc": "2.0", "id": 20, "method": "tools/list"})
     )
@@ -298,8 +410,10 @@ def test_tools_list_exposes_full_auto_ci_tools(dummy_service):
     assert all("inputSchema" in tool for tool in tools)
 
 
-def test_get_working_tree_issues_returns_structured_issues(dummy_service):
-    dummy_service.tool_runner.results = {
+def test_get_working_tree_issues_returns_structured_issues(service_stub):
+    """getWorkingTreeIssues should return structured issues and summary."""
+
+    service_stub.tool_runner.results = {
         "pylint": {
             "status": "success",
             "details": [
@@ -316,7 +430,7 @@ def test_get_working_tree_issues_returns_structured_issues(dummy_service):
         }
     }
 
-    server = MCPServer(dummy_service)
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -341,10 +455,12 @@ def test_get_working_tree_issues_returns_structured_issues(dummy_service):
     assert result["summary"]["total"] == 1
 
 
-def test_get_working_tree_issues_is_not_cached(dummy_service):
-    server = MCPServer(dummy_service)
+def test_get_working_tree_issues_is_not_cached(service_stub):
+    """getWorkingTreeIssues should not cache tool runner output."""
 
-    dummy_service.tool_runner.results = {
+    server = MCPServer(service_stub)
+
+    service_stub.tool_runner.results = {
         "pylint": {
             "status": "success",
             "details": [
@@ -371,7 +487,7 @@ def test_get_working_tree_issues_is_not_cached(dummy_service):
     )["result"]
     assert first["issues"]
 
-    dummy_service.tool_runner.results = {"pylint": {"status": "success", "details": []}}
+    service_stub.tool_runner.results = {"pylint": {"status": "success", "details": []}}
     second = _run(
         server.handle_message(
             {
@@ -385,8 +501,10 @@ def test_get_working_tree_issues_is_not_cached(dummy_service):
     assert second["issues"] == []
 
 
-def test_tools_call_can_invoke_get_working_tree_issues(dummy_service):
-    dummy_service.tool_runner.results = {
+def test_tools_call_can_invoke_get_working_tree_issues(service_stub):
+    """tools/call should invoke getWorkingTreeIssues."""
+
+    service_stub.tool_runner.results = {
         "lizard": {
             "status": "success",
             "top_offenders": [
@@ -394,7 +512,7 @@ def test_tools_call_can_invoke_get_working_tree_issues(dummy_service):
             ],
         }
     }
-    server = MCPServer(dummy_service)
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -415,8 +533,10 @@ def test_tools_call_can_invoke_get_working_tree_issues(dummy_service):
     assert payload["issues"][0]["tool"] == "lizard"
 
 
-def test_tools_call_returns_text_content(dummy_service):
-    server = MCPServer(dummy_service)
+def test_tools_call_returns_text_content(service_stub):
+    """tools/call should return text content payloads."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -432,12 +552,14 @@ def test_tools_call_returns_text_content(dummy_service):
     assert "content" in result
     assert result["content"][0]["type"] == "text"
     payload = json.loads(result["content"][0]["text"])
-    assert payload["repositories"] == dummy_service.repositories
+    assert payload["repositories"] == service_stub.repositories
 
 
-def test_tools_call_wraps_tool_failures_as_is_error(dummy_service):
-    dummy_service.run_tests_result = {"status": "failed", "tools": {}}
-    server = MCPServer(dummy_service)
+def test_tools_call_wraps_tool_failures_as_is_error(service_stub):
+    """tools/call should wrap tool failures as isError payloads."""
+
+    service_stub.run_tests_result = {"status": "failed", "tools": {}}
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -458,8 +580,10 @@ def test_tools_call_wraps_tool_failures_as_is_error(dummy_service):
     assert error_payload["code"] == -32004
 
 
-def test_initialize_defaults_missing_client_fields(dummy_service):
-    server = MCPServer(dummy_service)
+def test_initialize_defaults_missing_client_fields(service_stub):
+    """Initialize should fill defaults when client fields are missing."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -476,8 +600,10 @@ def test_initialize_defaults_missing_client_fields(dummy_service):
     assert result["serverInfo"]["name"] == "full-auto-ci"
 
 
-def test_initialize_rejects_unsupported_protocol(dummy_service):
-    server = MCPServer(dummy_service)
+def test_initialize_rejects_unsupported_protocol(service_stub):
+    """Initialize should reject unsupported protocol versions."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -495,9 +621,13 @@ def test_initialize_rejects_unsupported_protocol(dummy_service):
     assert "supportedVersions" in excinfo.value.data
 
 
-def test_shutdown_handler_signals_event(dummy_service):
+def test_shutdown_handler_signals_event(service_stub):
+    """shutdown should signal the server shutdown event."""
+
     async def scenario():
-        server = MCPServer(dummy_service)
+        """Execute shutdown request flow."""
+
+        server = MCPServer(service_stub)
         shutdown_event = asyncio.Event()
         server._shutdown_event = shutdown_event
 
@@ -511,9 +641,13 @@ def test_shutdown_handler_signals_event(dummy_service):
     _run(scenario())
 
 
-def test_tcp_server_emits_initialize_response(dummy_service):
+def test_tcp_server_emits_initialize_response(service_stub):
+    """TCP server should emit a valid initialize response."""
+
     async def scenario():
-        server = MCPServer(dummy_service)
+        """Start TCP server and perform an initialize exchange."""
+
+        server = MCPServer(service_stub)
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))
@@ -564,8 +698,10 @@ def test_tcp_server_emits_initialize_response(dummy_service):
     _run(scenario())
 
 
-def test_list_repositories_returns_service_data(dummy_service):
-    server = MCPServer(dummy_service)
+def test_list_repositories_returns_service_data(service_stub):
+    """listRepositories should return repository data from the service."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "listRepositories"})
     )
@@ -573,8 +709,10 @@ def test_list_repositories_returns_service_data(dummy_service):
     assert repos[0]["name"] == "Repo One"
 
 
-def test_queue_test_run_success(dummy_service):
-    server = MCPServer(dummy_service)
+def test_queue_test_run_success(service_stub):
+    """queueTestRun should enqueue tasks when the service accepts it."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -586,12 +724,14 @@ def test_queue_test_run_success(dummy_service):
         )
     )
     assert response["result"]["queued"] is True
-    assert dummy_service.queued == [(1, "deadbeef")]
+    assert service_stub.queued == [(1, "deadbeef")]
 
 
-def test_queue_test_run_failure(dummy_service):
-    dummy_service.add_test_task_should_succeed = False
-    server = MCPServer(dummy_service)
+def test_queue_test_run_failure(service_stub):
+    """queueTestRun should raise when the service rejects the task."""
+
+    service_stub.add_test_task_should_succeed = False
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -606,8 +746,10 @@ def test_queue_test_run_failure(dummy_service):
     assert excinfo.value.code == -32001
 
 
-def test_get_latest_results_enriches_runs(dummy_service):
-    server = MCPServer(dummy_service)
+def test_get_latest_results_enriches_runs(service_stub):
+    """getLatestResults should return test runs enriched with tool results."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -622,8 +764,10 @@ def test_get_latest_results_enriches_runs(dummy_service):
     assert runs[0]["results"][0]["tool"] == "pylint"
 
 
-def test_get_latest_results_defaults_to_single_run_and_single_result(dummy_service):
-    server = MCPServer(dummy_service)
+def test_get_latest_results_defaults_to_single_run_and_single_result(service_stub):
+    """getLatestResults should default to a single run and result."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -640,8 +784,10 @@ def test_get_latest_results_defaults_to_single_run_and_single_result(dummy_servi
     assert len(runs[0]["results"]) == 1
 
 
-def test_get_latest_results_allows_multiple_results(dummy_service):
-    server = MCPServer(dummy_service)
+def test_get_latest_results_allows_multiple_results(service_stub):
+    """getLatestResults should allow returning multiple tool results per run."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -658,8 +804,10 @@ def test_get_latest_results_allows_multiple_results(dummy_service):
     assert len(runs[0]["results"]) == 2
 
 
-def test_get_latest_results_allows_commit_filter(dummy_service):
-    server = MCPServer(dummy_service)
+def test_get_latest_results_allows_commit_filter(service_stub):
+    """getLatestResults should filter by commit hash when provided."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -672,11 +820,13 @@ def test_get_latest_results_allows_commit_filter(dummy_service):
     )
 
     assert response["result"]["testRuns"]
-    assert dummy_service.get_results_calls[-1] == (1, "abcdef1", 2)
+    assert service_stub.get_results_calls[-1] == (1, "abcdef1", 2)
 
 
-def test_requires_token_when_configured(dummy_service):
-    server = MCPServer(dummy_service, auth_token="secret")
+def test_requires_token_when_configured(service_stub):
+    """Requests should require a matching token when configured."""
+
+    server = MCPServer(service_stub, auth_token="secret")
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -698,8 +848,10 @@ def test_requires_token_when_configured(dummy_service):
     assert "repositories" in response["result"]
 
 
-def test_initialize_requires_token_when_configured(dummy_service):
-    server = MCPServer(dummy_service, auth_token="secret")
+def test_initialize_requires_token_when_configured(service_stub):
+    """Initialize should require a token when server auth is enabled."""
+
+    server = MCPServer(service_stub, auth_token="secret")
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -736,8 +888,10 @@ def test_initialize_requires_token_when_configured(dummy_service):
     assert response["result"]["serverInfo"]["name"] == "full-auto-ci"
 
 
-def test_add_repository_registers_repo(dummy_service):
-    server = MCPServer(dummy_service)
+def test_add_repository_registers_repo(service_stub):
+    """addRepository should register a repository via the service."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(  # type: ignore[arg-type]
             {
@@ -755,11 +909,13 @@ def test_add_repository_registers_repo(dummy_service):
 
     result = response["result"]
     assert result["repositoryId"] == 2
-    assert any(repo["name"] == "New Repo" for repo in dummy_service.repositories)
+    assert any(repo["name"] == "New Repo" for repo in service_stub.repositories)
 
 
-def test_add_repository_validates_params(dummy_service):
-    server = MCPServer(dummy_service)
+def test_add_repository_validates_params(service_stub):
+    """addRepository should validate inputs."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -774,9 +930,11 @@ def test_add_repository_validates_params(dummy_service):
     assert excinfo.value.code == -32602
 
 
-def test_add_repository_failure_raises(dummy_service):
-    dummy_service.add_repository_should_fail = True
-    server = MCPServer(dummy_service)
+def test_add_repository_failure_raises(service_stub):
+    """addRepository should raise when the service fails to add."""
+
+    service_stub.add_repository_should_fail = True
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -794,8 +952,10 @@ def test_add_repository_failure_raises(dummy_service):
     assert excinfo.value.code == -32002
 
 
-def test_remove_repository_success(dummy_service):
-    server = MCPServer(dummy_service)
+def test_remove_repository_success(service_stub):
+    """removeRepository should remove a repository by id."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -809,11 +969,13 @@ def test_remove_repository_success(dummy_service):
 
     result = response["result"]
     assert result["removed"] is True
-    assert not any(repo["id"] == 1 for repo in dummy_service.repositories)
+    assert not any(repo["id"] == 1 for repo in service_stub.repositories)
 
 
-def test_remove_repository_requires_valid_id(dummy_service):
-    server = MCPServer(dummy_service)
+def test_remove_repository_requires_valid_id(service_stub):
+    """removeRepository should validate repositoryId type."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -828,8 +990,10 @@ def test_remove_repository_requires_valid_id(dummy_service):
     assert excinfo.value.code == -32602
 
 
-def test_remove_repository_failure(dummy_service):
-    server = MCPServer(dummy_service)
+def test_remove_repository_failure(service_stub):
+    """removeRepository should raise when removing a missing repository."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -844,8 +1008,10 @@ def test_remove_repository_failure(dummy_service):
     assert excinfo.value.code == -32003
 
 
-def test_run_tests_returns_results(dummy_service):
-    server = MCPServer(dummy_service)
+def test_run_tests_returns_results(service_stub):
+    """runTests should execute and return results."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -859,11 +1025,13 @@ def test_run_tests_returns_results(dummy_service):
 
     assert response["result"]["status"] == "success"
     assert len(response["result"]["results"]["tools"]) == 1
-    assert dummy_service.run_tests_calls[-1] == (1, "abcdef1", False)
+    assert service_stub.run_tests_calls[-1] == (1, "abcdef1", False)
 
 
-def test_run_tests_allows_multiple_results(dummy_service):
-    server = MCPServer(dummy_service)
+def test_run_tests_allows_multiple_results(service_stub):
+    """runTests should allow returning multiple results per tool."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -879,8 +1047,10 @@ def test_run_tests_allows_multiple_results(dummy_service):
     assert len(response["result"]["results"]["tools"]) == 2
 
 
-def test_run_tests_allows_working_tree_flag(dummy_service):
-    server = MCPServer(dummy_service)
+def test_run_tests_allows_working_tree_flag(service_stub):
+    """runTests should pass through includeWorkingTree."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {
@@ -897,11 +1067,13 @@ def test_run_tests_allows_working_tree_flag(dummy_service):
     )
 
     assert response["result"]["status"] == "success"
-    assert dummy_service.run_tests_calls[-1] == (1, "abcdef1", True)
+    assert service_stub.run_tests_calls[-1] == (1, "abcdef1", True)
 
 
-def test_run_tests_rejects_non_boolean_working_tree_flag(dummy_service):
-    server = MCPServer(dummy_service)
+def test_run_tests_rejects_non_boolean_working_tree_flag(service_stub):
+    """runTests should validate includeWorkingTree is boolean."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -920,9 +1092,11 @@ def test_run_tests_rejects_non_boolean_working_tree_flag(dummy_service):
     assert excinfo.value.code == -32602
 
 
-def test_run_tests_failure_raises(dummy_service):
-    dummy_service.run_tests_result = {"status": "error", "error": "boom"}
-    server = MCPServer(dummy_service)
+def test_run_tests_failure_raises(service_stub):
+    """runTests should raise if the service returns an error status."""
+
+    service_stub.run_tests_result = {"status": "error", "error": "boom"}
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(
             server.handle_message(
@@ -939,6 +1113,8 @@ def test_run_tests_failure_raises(dummy_service):
 
 
 def test_transport_reader_handles_content_length():
+    """Transport reader should decode Content-Length framing."""
+
     async def _run():
         reader = asyncio.StreamReader()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
@@ -954,6 +1130,8 @@ def test_transport_reader_handles_content_length():
 
 
 def test_transport_reader_handles_newline():
+    """Transport reader should decode newline-delimited framing."""
+
     async def _run():
         reader = asyncio.StreamReader()
         payload = {"jsonrpc": "2.0", "id": 2, "method": "handshake"}
@@ -968,6 +1146,8 @@ def test_transport_reader_handles_newline():
 
 
 def test_encode_message_content_length_round_trip():
+    """Content-length encoding should round-trip back to the original payload."""
+
     payload = {"jsonrpc": "2.0", "id": 3, "result": {}}
     encoded = MCPServer._encode_message(payload, "content-length")
     header, body = encoded.split(b"\r\n\r\n", 1)
@@ -976,15 +1156,19 @@ def test_encode_message_content_length_round_trip():
     assert json.loads(body.decode("utf-8")) == payload
 
 
-def test_unknown_method_raises(dummy_service):
-    server = MCPServer(dummy_service)
+def test_unknown_method_raises(service_stub):
+    """Unknown methods should return a JSON-RPC method-not-found error."""
+
+    server = MCPServer(service_stub)
     with pytest.raises(MCPError) as excinfo:
         _run(server.handle_message({"jsonrpc": "2.0", "id": 8, "method": "unknown"}))
     assert excinfo.value.code == -32601
 
 
-def test_notifications_without_id_are_ignored(dummy_service):
-    server = MCPServer(dummy_service)
+def test_notifications_without_id_are_ignored(service_stub):
+    """Notifications (no id) should not return a response."""
+
+    server = MCPServer(service_stub)
     response = _run(
         server.handle_message(
             {

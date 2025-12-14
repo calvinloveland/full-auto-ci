@@ -580,7 +580,6 @@ class TestCLI(unittest.TestCase):
 
         def fake_run(coro):
             coro.close()
-            return None
 
         mock_async_run.side_effect = fake_run
 

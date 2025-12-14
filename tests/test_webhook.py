@@ -7,12 +7,10 @@ import hmac
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.webhook import WebhookHandler
 
 
@@ -22,9 +20,8 @@ class TestWebhookHandler(unittest.TestCase):
     def setUp(self):
         """Set up the test environment."""
         # Create a temporary database
-        self.temp_db = tempfile.NamedTemporaryFile(delete=False)
-        self.db_path = self.temp_db.name
-        self.temp_db.close()
+        with tempfile.NamedTemporaryFile(delete=False) as temp_db:
+            self.db_path = temp_db.name
 
         # Create the test tables
         conn = sqlite3.connect(self.db_path)
@@ -171,6 +168,7 @@ class TestWebhookHandler(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_handle_github_push_success(self):
+        """Test handling a GitHub push event."""
         payload = {
             "repository": {
                 "full_name": "octocat/Hello-World",
@@ -195,6 +193,7 @@ class TestWebhookHandler(unittest.TestCase):
         self.assertEqual(result["author"], "Octo")
 
     def test_handle_gitlab_push_success(self):
+        """Test handling a GitLab push event."""
         payload = {
             "project": {
                 "path_with_namespace": "example/Project",
@@ -218,6 +217,7 @@ class TestWebhookHandler(unittest.TestCase):
         self.assertEqual(result["hash"], "def456")
 
     def test_handle_bitbucket_push_success(self):
+        """Test handling a Bitbucket push event."""
         payload = {
             "repository": {
                 "full_name": "workspace/repo",

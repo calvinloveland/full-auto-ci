@@ -703,8 +703,28 @@ class DataAccess:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Return historical results for ``tool`` within ``repository_id``."""
+        rows = self._fetch_tool_history_rows(repository_id, tool, limit)
+        return [self._hydrate_tool_history_row(row) for row in rows]
 
-        query = [
+    def _fetch_tool_history_rows(
+        self,
+        repository_id: int,
+        tool: str,
+        limit: Optional[int],
+    ) -> List[Tuple[Any, Any, Any, Any]]:
+        sql, params = self._build_tool_history_query(repository_id, tool, limit)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+
+    @staticmethod
+    def _build_tool_history_query(
+        repository_id: int,
+        tool: str,
+        limit: Optional[int],
+    ) -> Tuple[str, List[Any]]:
+        query_parts = [
             "SELECT r.status, r.output, r.duration, r.created_at",
             "FROM results r",
             "JOIN commits c ON c.id = r.commit_id",
@@ -714,30 +734,22 @@ class DataAccess:
 
         params: List[Any] = [repository_id, tool]
         if limit and limit > 0:
-            query.append("LIMIT ?")
+            query_parts.append("LIMIT ?")
             params.append(int(limit))
 
-        sql = " ".join(query)
+        return " ".join(query_parts), params
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
-
-        history: List[Dict[str, Any]] = []
-        for status, output_text, duration, created_at in rows:
-            parsed_output = self._parse_output_text(output_text)
-            history.append(
-                {
-                    "status": status,
-                    "output": output_text,
-                    "duration": duration,
-                    "created_at": created_at,
-                    "data": parsed_output,
-                }
-            )
-
-        return history
+    def _hydrate_tool_history_row(
+        self, row: Tuple[Any, Any, Any, Any]
+    ) -> Dict[str, Any]:
+        status, output_text, duration, created_at = row
+        return {
+            "status": status,
+            "output": output_text,
+            "duration": duration,
+            "created_at": created_at,
+            "data": self._parse_output_text(output_text),
+        }
 
     @staticmethod
     def _hydrate_result_row(row: Tuple[Any, ...]) -> Dict[str, Any]:

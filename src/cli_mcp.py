@@ -50,7 +50,11 @@ def serve(
     token_state = "enabled" if token else "disabled"
 
     if getattr(args, "stdio", False) and print_fn is print:
-        print_fn = lambda message: print(message, file=sys.stderr, flush=True)
+
+        def _stderr_print(message: str) -> None:
+            print(message, file=sys.stderr, flush=True)
+
+        print_fn = _stderr_print
 
     if getattr(args, "stdio", False):
         print_fn(f"Starting MCP server on stdio (token={token_state})")

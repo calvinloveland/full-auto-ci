@@ -45,6 +45,11 @@ class RatchetManager:
         self._data = data
         self._config = config
 
+    def get_rule(self, tool_name: str) -> Optional[RatchetRule]:
+        """Return the configured ratchet rule for ``tool_name`` if enabled."""
+
+        return self._build_rule(tool_name)
+
     def apply(self, repo_id: int, results: Dict[str, Dict[str, Any]]) -> None:
         """Mutate ``results`` with ratchet enforcement for each tool."""
 
@@ -61,7 +66,10 @@ class RatchetManager:
             metric_value = self._extract_metric(payload, rule.metric)
             numeric_value = self._coerce_float(metric_value)
             if numeric_value is None:
-                message = f"Ratchet metric '{rule.metric}' missing or non-numeric in {tool_name} result"
+                message = (
+                    f"Ratchet metric '{rule.metric}' missing or non-numeric in "
+                    f"{tool_name} result"
+                )
                 payload["status"] = "error"
                 payload["error"] = message
                 logger.warning(message)
@@ -186,11 +194,17 @@ class RatchetManager:
         previous_best = self._best_historical_value(repo_id, tool_name, rule)
 
         if self._meets_target(current_value, rule):
-            message = f"{tool_name} ratchet target achieved: {rule.metric} {self._format_direction(rule)} {self._format_value(rule.target)}"
+            message = (
+                f"{tool_name} ratchet target achieved: {rule.metric} "
+                f"{self._format_direction(rule)} {self._format_value(rule.target)}"
+            )
             return RatchetEvaluation(True, "target-met", previous_best, message)
 
         if previous_best is None:
-            message = f"{tool_name} ratchet baseline set at {self._format_value(current_value)}; target {self._format_value(rule.target)}"
+            message = (
+                f"{tool_name} ratchet baseline set at {self._format_value(current_value)}; "
+                f"target {self._format_value(rule.target)}"
+            )
             return RatchetEvaluation(True, "baseline", previous_best, message)
 
         if self._regressed(current_value, previous_best, rule):

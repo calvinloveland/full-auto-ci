@@ -80,11 +80,7 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                 "Running Pylint on %s (targets: %s)", repo_path, ", ".join(targets)
             )
 
-            cmd = ["pylint", "--output-format=json"]
-            rcfile = self._resolve_config_file(repo_path)
-            if rcfile:
-                cmd.extend(["--rcfile", rcfile])
-            cmd.extend(targets)
+            cmd = self._build_command(repo_path, targets)
             process = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -93,53 +89,68 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                 cwd=repo_path,
             )
 
-            # Parse Pylint output
-            if process.returncode >= 0 and process.stdout:
-                try:
-                    results = json.loads(process.stdout)
-
-                    # Count issues by type
-                    issues_by_type = {}
-                    for item in results:
-                        issue_type = item.get("type", "unknown")
-                        issues_by_type[issue_type] = (
-                            issues_by_type.get(issue_type, 0) + 1
-                        )
-
-                    # Calculate score
-                    # Pylint score is from 0 to 10, with 10 being perfect
-                    # A rough estimation if we don't have the exact score
-                    score = 10.0
-                    for issue_type, count in issues_by_type.items():
-                        if issue_type == "error":
-                            score -= 0.5 * count
-                        elif issue_type == "warning":
-                            score -= 0.2 * count
-                        elif issue_type == "convention":
-                            score -= 0.1 * count
-
-                    score = max(0.0, score)
-
-                    return {
-                        "status": "success",
-                        "score": score,
-                        "issues": issues_by_type,
-                        "details": results,
-                    }
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse Pylint JSON output")
-                    return {"status": "error", "error": "Failed to parse Pylint output"}
-            else:
-                logger.error("Pylint failed with return code %s", process.returncode)
-                return {
-                    "status": "error",
-                    "error": f"Pylint failed with return code {process.returncode}",
-                    "stdout": process.stdout,
-                    "stderr": process.stderr,
-                }
+            return self._parse_process(process)
         except Exception as error:  # pylint: disable=broad-except
             logger.exception("Error running Pylint")
             return {"status": "error", "error": str(error)}
+
+    def _build_command(self, repo_path: str, targets: List[str]) -> List[str]:
+        cmd = ["pylint", "--output-format=json"]
+        rcfile = self._resolve_config_file(repo_path)
+        if rcfile:
+            cmd.extend(["--rcfile", rcfile])
+        cmd.extend(targets)
+        return cmd
+
+    @staticmethod
+    def _count_issues(results: Any) -> Dict[str, int]:
+        issues_by_type: Dict[str, int] = {}
+        if not isinstance(results, list):
+            return issues_by_type
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            issue_type = item.get("type", "unknown")
+            issues_by_type[issue_type] = issues_by_type.get(issue_type, 0) + 1
+        return issues_by_type
+
+    @staticmethod
+    def _estimate_score(issues_by_type: Dict[str, int]) -> float:
+        score = 10.0
+        penalties = {
+            "error": 0.5,
+            "warning": 0.2,
+            "convention": 0.1,
+        }
+        for issue_type, count in issues_by_type.items():
+            score -= penalties.get(issue_type, 0.0) * count
+        return max(0.0, score)
+
+    def _parse_process(self, process: Any) -> Dict[str, Any]:
+        if process.returncode < 0 or not process.stdout:
+            logger.error("Pylint failed with return code %s", process.returncode)
+            return {
+                "status": "error",
+                "error": f"Pylint failed with return code {process.returncode}",
+                "stdout": getattr(process, "stdout", None),
+                "stderr": getattr(process, "stderr", None),
+            }
+
+        try:
+            results = json.loads(process.stdout)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse Pylint JSON output")
+            return {"status": "error", "error": "Failed to parse Pylint output"}
+
+        issues_by_type = self._count_issues(results)
+        score = self._estimate_score(issues_by_type)
+
+        return {
+            "status": "success",
+            "score": score,
+            "issues": issues_by_type,
+            "details": results,
+        }
 
     def _discover_targets(self, repo_path: str) -> List[str]:
         """Determine which paths Pylint should analyze for the given repository."""
@@ -148,24 +159,45 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
             return ["."]
 
         targets: List[str] = []
+        targets.extend(self._standard_directories(repo_path))
+        targets.extend(self._top_level_modules(repo_path))
 
-        src_dir = os.path.join(repo_path, "src")
-        if os.path.isdir(src_dir):
-            targets.append("src")
+        if not targets:
+            targets.extend(self._package_directories(repo_path))
 
-        tests_dir = os.path.join(repo_path, "tests")
-        if os.path.isdir(tests_dir):
-            targets.append("tests")
+        if not targets:
+            return ["."]
 
-        ui_tests_dir = os.path.join(repo_path, "ui_tests")
-        if os.path.isdir(ui_tests_dir):
-            targets.append("ui_tests")
+        return self._unique_targets(targets)
 
-        # Include top-level Python modules (e.g. main.py) when present.
+    @staticmethod
+    def _unique_targets(targets: List[str]) -> List[str]:
+        seen: set[str] = set()
+        unique_targets: List[str] = []
+        for target in targets:
+            if target in seen:
+                continue
+            seen.add(target)
+            unique_targets.append(target)
+        return unique_targets
+
+    @staticmethod
+    def _standard_directories(repo_path: str) -> List[str]:
+        candidates = ["src", "tests", "ui_tests"]
+        targets: List[str] = []
+        for candidate in candidates:
+            if os.path.isdir(os.path.join(repo_path, candidate)):
+                targets.append(candidate)
+        return targets
+
+    @staticmethod
+    def _top_level_modules(repo_path: str) -> List[str]:
         try:
             entries = sorted(os.listdir(repo_path))
         except OSError:
-            entries = []
+            return []
+
+        modules: List[str] = []
         for entry in entries:
             if not entry.endswith(".py"):
                 continue
@@ -173,24 +205,8 @@ class Pylint(Tool):  # pylint: disable=too-few-public-methods
                 continue
             full_path = os.path.join(repo_path, entry)
             if os.path.isfile(full_path):
-                targets.append(entry)
-
-        if not targets:
-            root_packages = self._package_directories(repo_path)
-            if root_packages:
-                targets.extend(root_packages)
-
-        if not targets:
-            return ["."]
-
-        seen = set()
-        unique_targets: List[str] = []
-        for target in targets:
-            if target not in seen:
-                seen.add(target)
-                unique_targets.append(target)
-
-        return unique_targets
+                modules.append(entry)
+        return modules
 
     def _package_directories(self, base_path: str) -> List[str]:
         """Return Python package directories directly under ``base_path``."""
@@ -445,17 +461,20 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
         logger.info("Running coverage on %s", repo_path)
         cmd = ["coverage", "run", "-m", *self.run_tests_cmd]
         start_time = time.perf_counter()
-        kwargs: Dict[str, Any] = {
-            "capture_output": True,
-            "text": True,
-            "check": False,
-        }
+        timeout_kwargs: Dict[str, Any] = {}
         if self.timeout is not None:
-            kwargs["timeout"] = self.timeout
+            timeout_kwargs["timeout"] = self.timeout
 
         timed_out = False
         try:
-            process = subprocess.run(cmd, **kwargs)
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_path,
+                **timeout_kwargs,
+            )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             process = SimpleNamespace(
@@ -510,17 +529,19 @@ class Coverage(Tool):  # pylint: disable=too-few-public-methods
     def _generate_coverage_xml(self) -> "Coverage._XmlContext":
         cmd = ["coverage", "xml"]
         start_time = time.perf_counter()
-        kwargs: Dict[str, Any] = {
-            "capture_output": True,
-            "text": True,
-            "check": False,
-        }
+        timeout_kwargs: Dict[str, Any] = {}
         if self.xml_timeout is not None:
-            kwargs["timeout"] = self.xml_timeout
+            timeout_kwargs["timeout"] = self.xml_timeout
 
         timed_out = False
         try:
-            process = subprocess.run(cmd, **kwargs)
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                **timeout_kwargs,
+            )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             process = SimpleNamespace(
@@ -813,7 +834,7 @@ class Lizard(Tool):  # pylint: disable=too-few-public-methods
         values = [
             value.text.strip() if value.text else "" for value in item.findall("value")
         ]
-        metrics = {label: value for label, value in zip(labels, values)}
+        metrics = dict(zip(labels, values))
 
         name_attr = item.get("name", "")
         func_name, filename, line = self._extract_location_from_cli_name(

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Main entry point for Full Auto CI."""
-import sys
-import os
 import logging
+import sys
 
 from src.cli import CLI
 
