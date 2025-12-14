@@ -94,6 +94,17 @@ class DummyService:
             },
         }
         self.get_results_calls: List[Tuple[int, Optional[str], int]] = []
+        self.tool_runner = DummyToolRunner(
+            {
+                "pylint": {
+                    "status": "success",
+                    "score": 10.0,
+                    "issues": {},
+                    "details": [],
+                },
+                "lizard": {"status": "success", "summary": {"above_threshold": 0}},
+            }
+        )
 
     def list_repositories(self):
         return self.repositories
@@ -148,6 +159,24 @@ class DummyService:
         return self.run_tests_result
 
 
+class DummyToolRunner:
+    def __init__(self, results: Dict[str, Any]):
+        self._results = results
+        self.calls: List[str] = []
+
+    @property
+    def results(self) -> Dict[str, Any]:
+        return self._results
+
+    @results.setter
+    def results(self, value: Dict[str, Any]) -> None:
+        self._results = value
+
+    def run_all(self, repo_path: str) -> Dict[str, Any]:
+        self.calls.append(repo_path)
+        return self._results
+
+
 @pytest.fixture()
 def dummy_service():
     return DummyService()
@@ -188,6 +217,7 @@ def test_handshake_announces_capabilities(dummy_service):
         "queueTestRun",
         "getLatestResults",
         "runTests",
+        "getWorkingTreeIssues",
         "shutdown",
     }
 
@@ -262,9 +292,127 @@ def test_tools_list_exposes_full_auto_ci_tools(dummy_service):
         "queueTestRun",
         "getLatestResults",
         "runTests",
+        "getWorkingTreeIssues",
         "shutdown",
     } <= names
     assert all("inputSchema" in tool for tool in tools)
+
+
+def test_get_working_tree_issues_returns_structured_issues(dummy_service):
+    dummy_service.tool_runner.results = {
+        "pylint": {
+            "status": "success",
+            "details": [
+                {
+                    "type": "warning",
+                    "path": "src/cli.py",
+                    "line": 12,
+                    "column": 3,
+                    "message": "Unused import",
+                    "message-id": "W0611",
+                    "symbol": "unused-import",
+                }
+            ],
+        }
+    }
+
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 200,
+                "method": "getWorkingTreeIssues",
+                "params": {"repoPath": ".", "maxIssues": 10},
+            }
+        )
+    )
+
+    result = response["result"]
+    assert result["truncated"] is False
+    assert isinstance(result["issues"], list)
+    assert result["issues"]
+    issue = result["issues"][0]
+    assert issue["tool"] == "pylint"
+    assert issue["severity"] in {"warning", "error", "info"}
+    assert issue["path"] == "src/cli.py"
+    assert issue["line"] == 12
+    assert "summary" in result
+    assert result["summary"]["total"] == 1
+
+
+def test_get_working_tree_issues_is_not_cached(dummy_service):
+    server = MCPServer(dummy_service)
+
+    dummy_service.tool_runner.results = {
+        "pylint": {
+            "status": "success",
+            "details": [
+                {
+                    "type": "error",
+                    "path": "main.py",
+                    "line": 1,
+                    "column": 1,
+                    "message": "Synthetic error",
+                    "message-id": "E9999",
+                }
+            ],
+        }
+    }
+    first = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 201,
+                "method": "getWorkingTreeIssues",
+                "params": {"repoPath": ".", "maxIssues": 50},
+            }
+        )
+    )["result"]
+    assert first["issues"]
+
+    dummy_service.tool_runner.results = {"pylint": {"status": "success", "details": []}}
+    second = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 202,
+                "method": "getWorkingTreeIssues",
+                "params": {"repoPath": ".", "maxIssues": 50},
+            }
+        )
+    )["result"]
+    assert second["issues"] == []
+
+
+def test_tools_call_can_invoke_get_working_tree_issues(dummy_service):
+    dummy_service.tool_runner.results = {
+        "lizard": {
+            "status": "success",
+            "top_offenders": [
+                {"name": "f", "filename": "src/tools.py", "line": 10, "ccn": 42}
+            ],
+        }
+    }
+    server = MCPServer(dummy_service)
+    response = _run(
+        server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 203,
+                "method": "tools/call",
+                "params": {
+                    "name": "getWorkingTreeIssues",
+                    "arguments": {"repoPath": ".", "maxIssues": 5},
+                },
+            }
+        )
+    )
+
+    result = response["result"]
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["summary"]["total"] == 1
+    assert payload["issues"][0]["tool"] == "lizard"
 
 
 def test_tools_call_returns_text_content(dummy_service):

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sys
 import uuid
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ class MCPServer:
             "addRepository": self._handle_add_repository,
             "removeRepository": self._handle_remove_repository,
             "runTests": self._handle_run_tests,
+            "getWorkingTreeIssues": self._handle_get_working_tree_issues,
             "logging/setLevel": self._handle_logging_set_level,
             "tools/list": self._handle_tools_list,
             "tools/call": self._handle_tools_call,
@@ -448,6 +450,250 @@ class MCPServer:
         }
         return weights.get(name, 5)
 
+    async def _handle_get_working_tree_issues(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run enabled tools against the current working tree and return issues.
+
+        This handler intentionally does not cache results: every call re-runs the
+        toolchain so agents can fix issues and immediately request an updated list.
+        """
+
+        max_issues = params.get("maxIssues", 50)
+        repo_path = params.get("repoPath", ".")
+        tool_names = params.get("toolNames")
+
+        if not isinstance(max_issues, int) or max_issues <= 0:
+            raise MCPError(code=-32602, message="maxIssues must be a positive integer")
+        if not isinstance(repo_path, str) or not repo_path.strip():
+            raise MCPError(code=-32602, message="repoPath must be a non-empty string")
+
+        tool_filter: Optional[set[str]] = None
+        if tool_names is not None:
+            if not isinstance(tool_names, list) or not all(
+                isinstance(item, str) and item.strip() for item in tool_names
+            ):
+                raise MCPError(
+                    code=-32602,
+                    message="toolNames must be a list of non-empty strings",
+                )
+            tool_filter = {item.strip() for item in tool_names}
+
+        root = self._resolve_repo_root(repo_path)
+
+        tool_runner = getattr(self.service, "tool_runner", None)
+        if tool_runner is None or not hasattr(tool_runner, "run_all"):
+            raise MCPError(
+                code=-32005,
+                message="Tool runner not available",
+            )
+
+        results = tool_runner.run_all(root)
+        if not isinstance(results, dict):
+            raise MCPError(code=-32006, message="Tool runner returned invalid results")
+
+        issues, truncated = self._extract_issues(
+            results,
+            max_issues=max_issues,
+            tool_filter=tool_filter,
+        )
+
+        summary = self._summarize_issues(issues)
+
+        return {
+            "root": root,
+            "issues": issues,
+            "summary": summary,
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _resolve_repo_root(repo_path: str) -> str:
+        cwd = os.path.abspath(os.getcwd())
+        candidate = repo_path.strip()
+        if os.path.isabs(candidate):
+            root = os.path.abspath(candidate)
+        else:
+            root = os.path.abspath(os.path.join(cwd, candidate))
+
+        if root != cwd and not root.startswith(cwd + os.sep):
+            raise MCPError(
+                code=-32602,
+                message="repoPath must be within the server working directory",
+                data={"cwd": cwd, "repoPath": repo_path},
+            )
+
+        if not os.path.isdir(root):
+            raise MCPError(
+                code=-32602,
+                message="repoPath must point to a directory",
+                data={"repoPath": repo_path, "resolved": root},
+            )
+
+        return root
+
+    def _extract_issues(
+        self,
+        results: Dict[str, Any],
+        *,
+        max_issues: int,
+        tool_filter: Optional[set[str]],
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        issues: List[Dict[str, Any]] = []
+
+        for tool_name, tool_result in results.items():
+            if tool_filter is not None and tool_name not in tool_filter:
+                continue
+            if not isinstance(tool_result, dict):
+                continue
+
+            status = str(tool_result.get("status", "")).strip().lower()
+            if status and status not in {"success", "passed", "ok"}:
+                issues.append(
+                    self._make_issue(
+                        tool=tool_name,
+                        severity="error",
+                        message=str(tool_result.get("error") or "Tool failed"),
+                    )
+                )
+                if len(issues) >= max_issues:
+                    return issues[:max_issues], True
+
+            if tool_name == "pylint":
+                details = tool_result.get("details")
+                if isinstance(details, list):
+                    for item in details:
+                        if not isinstance(item, dict):
+                            continue
+                        issues.append(self._issue_from_pylint(item))
+                        if len(issues) >= max_issues:
+                            return issues[:max_issues], True
+
+            if tool_name == "lizard":
+                offenders = tool_result.get("top_offenders")
+                if isinstance(offenders, list):
+                    for offender in offenders:
+                        if not isinstance(offender, dict):
+                            continue
+                        issues.append(self._issue_from_lizard(offender))
+                        if len(issues) >= max_issues:
+                            return issues[:max_issues], True
+
+        return issues, False
+
+    def _issue_from_pylint(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        pylint_type = str(item.get("type") or "").strip().lower()
+        severity_map = {
+            "error": "error",
+            "warning": "warning",
+            "refactor": "info",
+            "convention": "info",
+            "info": "info",
+        }
+        severity = severity_map.get(pylint_type, "warning")
+
+        path = item.get("path") or item.get("abspath")
+        rel_path = str(path) if path is not None else None
+        if rel_path is not None:
+            rel_path = rel_path.replace("\\", "/")
+            cwd = os.path.abspath(os.getcwd())
+            abs_path = os.path.abspath(rel_path)
+            if abs_path.startswith(cwd + os.sep):
+                rel_path = os.path.relpath(abs_path, cwd).replace("\\", "/")
+
+        message = str(item.get("message") or "Pylint issue")
+        code = item.get("message-id") or item.get("symbol")
+
+        return self._make_issue(
+            tool="pylint",
+            severity=severity,
+            message=message,
+            path=rel_path,
+            line=self._coerce_int(item.get("line")),
+            column=self._coerce_int(item.get("column")),
+            code=str(code) if code is not None else None,
+        )
+
+    def _issue_from_lizard(self, offender: Dict[str, Any]) -> Dict[str, Any]:
+        filename = offender.get("filename")
+        rel_path = str(filename) if filename is not None else None
+        return self._make_issue(
+            tool="lizard",
+            severity="warning",
+            message=f"High cyclomatic complexity (CCN={offender.get('ccn')})",
+            path=rel_path,
+            line=self._coerce_int(offender.get("line")),
+        )
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value.strip()))
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _make_issue(
+        *,
+        tool: str,
+        severity: str,
+        message: str,
+        path: Optional[str] = None,
+        line: Optional[int] = None,
+        column: Optional[int] = None,
+        code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        fingerprint = "|".join(
+            [
+                tool,
+                severity,
+                code or "",
+                (path or "").replace("\\", "/"),
+                str(line or ""),
+                str(column or ""),
+                message.strip(),
+            ]
+        )
+        issue_id = uuid.uuid5(uuid.NAMESPACE_URL, fingerprint).hex
+        payload: Dict[str, Any] = {
+            "id": issue_id,
+            "tool": tool,
+            "severity": severity,
+            "message": message,
+        }
+        if code is not None:
+            payload["code"] = code
+        if path is not None:
+            payload["path"] = path
+        if line is not None:
+            payload["line"] = line
+        if column is not None:
+            payload["column"] = column
+        return payload
+
+    @staticmethod
+    def _summarize_issues(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        by_severity: Dict[str, int] = {}
+        by_tool: Dict[str, int] = {}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = str(issue.get("severity") or "unknown")
+            tool = str(issue.get("tool") or "unknown")
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            by_tool[tool] = by_tool.get(tool, 0) + 1
+        return {
+            "total": len(issues),
+            "bySeverity": by_severity,
+            "byTool": by_tool,
+        }
+
     async def _handle_logging_set_level(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Adjust the effective log level for the MCP server."""
 
@@ -786,6 +1032,10 @@ class MCPServer:
                 "description": "Fetch recent test runs with tool results for a repository.",
             },
             {
+                "name": "getWorkingTreeIssues",
+                "description": "Run enabled tools on the server working tree and return a capped issue list.",
+            },
+            {
                 "name": "shutdown",
                 "description": "Request the MCP server to terminate.",
             },
@@ -833,6 +1083,7 @@ class MCPServer:
             "queueTestRun": self._handle_queue_test_run,
             "getLatestResults": self._handle_get_latest_results,
             "runTests": self._handle_run_tests,
+            "getWorkingTreeIssues": self._handle_get_working_tree_issues,
             "shutdown": self._handle_shutdown,
         }
 
@@ -912,6 +1163,19 @@ class MCPServer:
                         "includeWorkingTree": {"type": "boolean", "default": False},
                     },
                     "required": ["repositoryId", "commit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "getWorkingTreeIssues",
+                "description": "Run enabled tools on the server working tree and return a capped issue list.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repoPath": {"type": "string", "default": "."},
+                        "maxIssues": {"type": "integer", "default": 50},
+                        "toolNames": {"type": "array", "items": {"type": "string"}},
+                    },
                     "additionalProperties": False,
                 },
             },
