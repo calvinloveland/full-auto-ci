@@ -262,8 +262,7 @@ class CLI:
             return 1
 
         if not parsed_args.command:
-            print("Error: No command specified")
-            return 1
+            return self._run_default_tools()
 
         handler_map = {
             "service": self._handle_service_command,
@@ -285,6 +284,39 @@ class CLI:
 
     def _handle_service_command(self, args: argparse.Namespace) -> int:
         return run_service_command(self, args)
+
+    def _run_default_tools(self) -> int:
+        repo_path = os.getcwd()
+        results = self.service.tool_runner.run_all(repo_path)
+
+        self._print_heading("Tool results")
+        print(f"Repository: {repo_path}")
+
+        if not results:
+            print("No tools enabled")
+            return 0
+
+        tool_rows: List[Sequence[str]] = []
+        issues_found = False
+        for tool_name, result in results.items():
+            status = self._format_status(result.get("status"))
+            summary = self._summarize_tool_output(
+                json.dumps(result), result.get("status")
+            )
+            tool_rows.append((tool_name, status, summary or "—"))
+            if self._tool_has_issues(tool_name, result):
+                issues_found = True
+
+        self._print_table(
+            ("Tool", "Status", "Details"),
+            tool_rows,
+            title="Tool results",
+            alignments=("left", "left", "left"),
+        )
+
+        overall_status = "No issues found" if not issues_found else "Issues found"
+        print(f"Overall: {overall_status}")
+        return 0 if not issues_found else 1
 
     def _handle_mcp_command(self, args: argparse.Namespace) -> int:
         if args.mcp_command == "serve":
@@ -1121,6 +1153,46 @@ class CLI:
         if isinstance(first_detail, dict) and first_detail.get("message"):
             return [str(first_detail["message"])]
         return []
+
+    @staticmethod
+    def _tool_has_issues(tool_name: str, result: Dict[str, Any]) -> bool:
+        status = str(result.get("status", "")).strip().lower()
+        if status and status not in {"success", "completed"}:
+            return True
+
+        if tool_name == "pylint":
+            issues = result.get("issues")
+            if isinstance(issues, dict):
+                if any(count > 0 for count in issues.values() if isinstance(count, int)):
+                    return True
+                if any(
+                    isinstance(count, (int, float)) and count > 0
+                    for count in issues.values()
+                ):
+                    return True
+
+        if tool_name == "lizard":
+            summary = result.get("summary")
+            if isinstance(summary, dict):
+                above = summary.get("above_threshold")
+                if isinstance(above, int) and above > 0:
+                    return True
+
+        if tool_name == "coverage":
+            pytest_summary = result.get("pytest_summary")
+            if isinstance(pytest_summary, dict):
+                if str(pytest_summary.get("status", "")).lower() == "error":
+                    return True
+
+            embedded_results = result.get("embedded_results")
+            if isinstance(embedded_results, list):
+                for item in embedded_results:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("status", "")).lower() == "error":
+                        return True
+
+        return False
 
     @staticmethod
     def _resolve_log_level(value: str) -> int:

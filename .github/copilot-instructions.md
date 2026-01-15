@@ -37,3 +37,6 @@
 - Service/database schema drift: align DB migrations manually before extending API/webhook functionality.
 - Git/webhook paths assume Unix-style home directories; adjust `work_dir` via `GitRepo` constructor in tests if needed.
 - Thread loops catch broad exceptions and only log; add instrumentation when debugging silent failures.
+
+## Workflow requirement
+- After completing each distinct piece of work, create a git commit that captures the changes.

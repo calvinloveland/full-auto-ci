@@ -1,16 +1,16 @@
 {
-    "servers": {
-        "full-auto-ci": {
-            "command": "python",
-            "args": [
-                "-m",
-                "src.cli",
-                "mcp",
-                "serve",
-                "--stdio",
-                "--no-token"
-            ],
-            "cwd": "${workspaceFolder}"
-        }
-    }
+	"servers": {
+		"full-auto-ci": {
+			"command": "python",
+			"args": [
+				"-m",
+				"src.cli",
+				"mcp",
+				"serve",
+				"--stdio",
+				"--no-token"
+			],
+			"cwd": "${workspaceFolder}"
+		}
+	}
 }
