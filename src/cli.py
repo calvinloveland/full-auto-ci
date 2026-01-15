@@ -1156,43 +1156,62 @@ class CLI:
 
     @staticmethod
     def _tool_has_issues(tool_name: str, result: Dict[str, Any]) -> bool:
-        status = str(result.get("status", "")).strip().lower()
-        if status and status not in {"success", "completed"}:
+        if CLI._tool_status_has_issue(result):
             return True
 
         if tool_name == "pylint":
-            issues = result.get("issues")
-            if isinstance(issues, dict):
-                if any(count > 0 for count in issues.values() if isinstance(count, int)):
-                    return True
-                if any(
-                    isinstance(count, (int, float)) and count > 0
-                    for count in issues.values()
-                ):
-                    return True
+            return CLI._pylint_has_issues(result)
 
         if tool_name == "lizard":
-            summary = result.get("summary")
-            if isinstance(summary, dict):
-                above = summary.get("above_threshold")
-                if isinstance(above, int) and above > 0:
-                    return True
+            return CLI._lizard_has_issues(result)
 
         if tool_name == "coverage":
-            pytest_summary = result.get("pytest_summary")
-            if isinstance(pytest_summary, dict):
-                if str(pytest_summary.get("status", "")).lower() == "error":
-                    return True
-
-            embedded_results = result.get("embedded_results")
-            if isinstance(embedded_results, list):
-                for item in embedded_results:
-                    if not isinstance(item, dict):
-                        continue
-                    if str(item.get("status", "")).lower() == "error":
-                        return True
+            return CLI._coverage_has_issues(result)
 
         return False
+
+    @staticmethod
+    def _tool_status_has_issue(result: Dict[str, Any]) -> bool:
+        status = str(result.get("status", "")).strip().lower()
+        return bool(status and status not in {"success", "completed"})
+
+    @staticmethod
+    def _pylint_has_issues(result: Dict[str, Any]) -> bool:
+        issues = result.get("issues")
+        if not isinstance(issues, dict):
+            return False
+
+        if any(count > 0 for count in issues.values() if isinstance(count, int)):
+            return True
+
+        return any(
+            isinstance(count, (int, float)) and count > 0 for count in issues.values()
+        )
+
+    @staticmethod
+    def _lizard_has_issues(result: Dict[str, Any]) -> bool:
+        summary = result.get("summary")
+        if not isinstance(summary, dict):
+            return False
+        above = summary.get("above_threshold")
+        return isinstance(above, int) and above > 0
+
+    @staticmethod
+    def _coverage_has_issues(result: Dict[str, Any]) -> bool:
+        pytest_summary = result.get("pytest_summary")
+        if isinstance(pytest_summary, dict):
+            if str(pytest_summary.get("status", "")).lower() == "error":
+                return True
+
+        embedded_results = result.get("embedded_results")
+        if not isinstance(embedded_results, list):
+            return False
+
+        return any(
+            isinstance(item, dict)
+            and str(item.get("status", "")).lower() == "error"
+            for item in embedded_results
+        )
 
     @staticmethod
     def _resolve_log_level(value: str) -> int:
