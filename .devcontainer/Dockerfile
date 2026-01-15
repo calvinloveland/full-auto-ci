@@ -20,10 +20,11 @@ ARG USER_GID=$USER_UID
 RUN mkdir -p /home/$USERNAME/.fullautoci \
     && chown -R $USER_UID:$USER_GID /home/$USERNAME/.fullautoci
 
-# Install pip requirements
-COPY requirements.txt /tmp/
-RUN pip --disable-pip-version-check --no-cache-dir install -r /tmp/requirements.txt \
-    && rm -f /tmp/requirements.txt
+# Install Python dependencies from pyproject.toml
+COPY pyproject.toml README.md /tmp/full_auto_ci/
+COPY src /tmp/full_auto_ci/src
+RUN pip --disable-pip-version-check --no-cache-dir install -e "/tmp/full_auto_ci[api,dashboard,dev]" \
+    && rm -rf /tmp/full_auto_ci
 
 # Setup Python tools and linters
 RUN pip --disable-pip-version-check --no-cache-dir install \
